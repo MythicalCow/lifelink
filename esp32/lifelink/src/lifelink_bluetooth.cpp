@@ -1,4 +1,5 @@
 #include "lifelink_bluetooth.h"
+#include "lifelink_display.h"
 
 // Nordic UART Service (NUS) UUIDs for BLE serial-style messaging
 #define BLE_UART_SERVICE_UUID          "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -48,8 +49,10 @@ LifeLinkBluetooth::LifeLinkBluetooth() {
   instance_ = this;
 }
 
-void LifeLinkBluetooth::begin() {
-  BLEDevice::init("LifeLink");
+void LifeLinkBluetooth::begin(uint32_t node_id) {
+  char name[20];
+  snprintf(name, sizeof(name), "LifeLink-%04lX", static_cast<unsigned long>(node_id & 0xFFFF));
+  BLEDevice::init(name);
   ble_server_ = BLEDevice::createServer();
   ble_server_->setCallbacks(new LifeLinkServerCallbacks(this));
 
@@ -111,6 +114,7 @@ void LifeLinkBluetooth::startAdvertising() {
     return;
   BLEDevice::startAdvertising();
   advertising_started_ = true;
+  LifeLinkDisplay::setBleState("Advertising");
   Serial.println("[BT] Advertising started.");
 }
 
@@ -118,6 +122,8 @@ void LifeLinkBluetooth::onClientConnect() {
   device_connected_ = true;
   advertising_started_ = false;
   state_ = BtState::kStandby;
+  LifeLinkDisplay::setBleConnected(true);
+  LifeLinkDisplay::setBleState("Standby");
   Serial.println("[BT] Client connected; standby for message.");
 }
 
@@ -125,6 +131,8 @@ void LifeLinkBluetooth::onClientDisconnect() {
   device_connected_ = false;
   advertising_started_ = false;
   state_ = BtState::kDisconnected;
+  LifeLinkDisplay::setBleConnected(false);
+  LifeLinkDisplay::setBleState("Advertising");
   Serial.println("[BT] Client disconnected.");
 }
 
@@ -137,6 +145,7 @@ void LifeLinkBluetooth::onMessageWritten(const uint8_t* data, size_t len) {
   message_buffer_[len] = '\0';
   message_len_ = len;
   state_ = BtState::kMessageReceived;
+  received_msg_displayed_ = false;
 }
 
 void LifeLinkBluetooth::runStateDisconnected() {
@@ -158,12 +167,20 @@ void LifeLinkBluetooth::runStateStandby() {
 }
 
 void LifeLinkBluetooth::runStateMessageReceived() {
-  // Run decision tree (callback); then return to standby.
+  if (!received_msg_displayed_) {
+    received_msg_displayed_ = true;
+    received_msg_display_until_ms_ = millis() + kReceivedMsgDisplayMs;
+    LifeLinkDisplay::setBleState("Received msg");
+    return;
+  }
+  if (millis() < received_msg_display_until_ms_)
+    return;
   if (message_callback_) {
     message_callback_(message_buffer_, message_len_);
   } else {
     Serial.printf("[BT] Message received (%u bytes): run decision tree (callback not set).\n",
                   static_cast<unsigned>(message_len_));
   }
+  LifeLinkDisplay::setBleState("Standby");
   state_ = BtState::kStandby;
 }

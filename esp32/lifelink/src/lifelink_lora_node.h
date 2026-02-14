@@ -7,6 +7,7 @@ class LifeLinkLoRaNode {
  public:
   void begin();
   void tick();
+  uint32_t nodeId() const { return node_id_; }
 
  private:
   enum class NodeState {

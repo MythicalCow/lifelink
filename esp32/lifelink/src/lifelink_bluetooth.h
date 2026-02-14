@@ -22,13 +22,14 @@ class LifeLinkBluetooth {
 
   static constexpr size_t kMessageBufferSize = 256;
   static constexpr unsigned long kConnectAttemptIntervalMs = 30000;
+  static constexpr unsigned long kReceivedMsgDisplayMs = 500;
 
   using MessageCallback = void (*)(const char* msg, size_t len);
 
   LifeLinkBluetooth();
   ~LifeLinkBluetooth() = default;
 
-  void begin();
+  void begin(uint32_t node_id);
   void tick();
 
   BtState state() const { return state_; }
@@ -69,4 +70,7 @@ class LifeLinkBluetooth {
   BLECharacteristic* tx_characteristic_ = nullptr;
   bool device_connected_ = false;
   bool advertising_started_ = false;
+
+  bool received_msg_displayed_ = false;
+  unsigned long received_msg_display_until_ms_ = 0;
 };

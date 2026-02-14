@@ -1,4 +1,5 @@
 #include "lifelink_lora_node.h"
+#include "lifelink_display.h"
 
 #include <esp_mac.h>
 
@@ -105,6 +106,7 @@ void LifeLinkLoRaNode::runStateIdle() {
 }
 
 void LifeLinkLoRaNode::runStateTx() {
+  LifeLinkDisplay::setLoraState("Sending");
   ++tx_count_;
   snprintf(
       tx_packet_,
@@ -133,6 +135,7 @@ void LifeLinkLoRaNode::runStateTx() {
 }
 
 void LifeLinkLoRaNode::runStateRx() {
+  LifeLinkDisplay::setLoraState("listening");
   Serial.println("[RX] Listening...");
 
   operation_done_ = false;
@@ -175,6 +178,7 @@ void LifeLinkLoRaNode::runStateRx() {
 
 void LifeLinkLoRaNode::runStateTxDone() {
   radio_.finishTransmit();
+  LifeLinkDisplay::setLoraState("sent");
   Serial.println("[TX] Sent successfully");
   Serial.println();
   state_ = NodeState::kRx;
@@ -183,6 +187,7 @@ void LifeLinkLoRaNode::runStateTxDone() {
 void LifeLinkLoRaNode::runStateRxDone() {
   ++rx_count_;
   radio_.standby();
+  LifeLinkDisplay::setLoraState("received");
 
   Serial.println("----------------------------------------");
   Serial.printf("[RX] Packet #%lu received\n", static_cast<unsigned long>(rx_count_));
@@ -199,6 +204,7 @@ void LifeLinkLoRaNode::runStateRxDone() {
 
 void LifeLinkLoRaNode::runStateTxTimeout() {
   ++error_count_;
+  LifeLinkDisplay::setLoraState("timeout");
   Serial.printf("[TX] Timeout (errors: %lu)\n", static_cast<unsigned long>(error_count_));
   radio_.standby();
   delay(1000);
@@ -220,6 +226,7 @@ void LifeLinkLoRaNode::runStateRxTimeout() {
 
 void LifeLinkLoRaNode::runStateRxError() {
   ++error_count_;
+  LifeLinkDisplay::setLoraState("error");
   Serial.printf("[RX] Error (possible CRC fail) - errors: %lu\n", static_cast<unsigned long>(error_count_));
   radio_.standby();
   state_ = NodeState::kRx;
