@@ -27,6 +27,28 @@ import {
   type AnchorReading,
 } from "./utils";
 
+/** Radio interface type */
+export type RadioType = "LoRa" | "BLE";
+
+/** Local persistent storage for trust/crypto data */
+export interface NodeStorage {
+  /** This node's public key */
+  publicKey: string;
+  /** This node's private key (never transmitted) */
+  privateKey: string;
+  /** Trusted peer public keys: nodeId -> publicKey */
+  trustedPeers: Map<number, string>;
+  /** Reputation scores: nodeId -> score (0-1) */
+  reputationScores: Map<number, number>;
+  /** Message history for verification */
+  messageHistory: Array<{
+    from: number;
+    content: string;
+    timestamp: number;
+    verified: boolean;
+  }>;
+}
+
 export class MeshNode {
   id: number;
   label: string;
@@ -54,6 +76,37 @@ export class MeshNode {
   /** Is this node an anchor (has GPS/known position)? */
   isAnchor: boolean;
 
+  /** Current LoRa channel (0-7) */
+  loraChannel = 0;
+
+  /** BLE enabled for phone connections */
+  bleEnabled = true;
+
+  /** Local storage for trust/crypto data */
+  storage: NodeStorage;
+
+  /** Callback for UI notifications (e.g., message received) */
+  onNotification?: (message: string, level: "info" | "warn" | "error") => void;
+
+  /** Messages received by this node (for UI display) */
+  receivedMessages: Array<{
+    id: string;
+    fromNodeId: number;
+    text: string;
+    timestamp: number;
+    hopCount: number;
+  }> = [];
+
+  /** Messages sent by this node with delivery status (for UI display) */
+  sentMessages: Array<{
+    id: string;
+    toNodeId: number;
+    text: string;
+    timestamp: number;
+    status: "sent" | "ok" | "collision" | "captured";
+    hopCount: number;
+  }> = [];
+
   neighborTable: Map<number, NeighborEntry> = new Map();
 
   /**
@@ -70,7 +123,10 @@ export class MeshNode {
   private packetCounter = 0;
   private nextBeaconTick: number;
   private dedup: string[] = [];
-  private rng: () => number;
+  protected rng: () => number; // Protected so MaliciousNode can access
+
+  /** Current tick (updated each tick for message timestamping) */
+  private currentTick = 0;
 
   /** Current radio state (reset each tick by simulator) */
   state: "idle" | "tx" | "rx" = "idle";
@@ -98,6 +154,15 @@ export class MeshNode {
       this.posConfidence = 1;
     }
 
+    // Initialize crypto/trust storage
+    this.storage = {
+      publicKey: this.generatePublicKey(),
+      privateKey: this.generatePrivateKey(),
+      trustedPeers: new Map(),
+      reputationScores: new Map(),
+      messageHistory: [],
+    };
+
     this.rng = xorshift32(id * 7919 + 1);
     this.nextBeaconTick =
       Math.floor(this.rng() * BEACON_INTERVAL) + BEACON_JITTER;
@@ -107,6 +172,9 @@ export class MeshNode {
 
   /** Called once per simulation tick. May enqueue a heartbeat. */
   tick(currentTick: number): void {
+    // Store current tick for message timestamping
+    this.currentTick = currentTick;
+    
     // Expire old neighbors and FTM readings
     for (const [nid, entry] of this.neighborTable) {
       if (currentTick - entry.lastSeenTick > NEIGHBOR_EXPIRY) {
@@ -357,6 +425,17 @@ export class MeshNode {
   private processData(packet: MeshPacket): MeshPacket | null {
     // Delivered!
     if (packet.destId === this.id) {
+      // Store the received message (strip tracking ID from payload)
+      const cleanPayload = packet.payload.replace(/\[trk:[^\]]+\]/, '');
+      
+      this.receivedMessages.push({
+        id: packet.id,
+        fromNodeId: packet.sourceId,
+        text: cleanPayload,
+        timestamp: this.currentTick,
+        hopCount: packet.hopCount,
+      });
+
       return {
         ...packet,
         id: `${this.id}-ack-${this.packetCounter++}`,
@@ -459,8 +538,11 @@ export class MeshNode {
 
   /** Enqueue a data packet to send */
   enqueueData(destId: number, payload: string): void {
+    const packetId = `${this.id}-${this.packetCounter++}`;
+    const cleanPayload = payload.replace(/\[trk:[^\]]+\]/, '');
+    
     this.txQueue.push({
-      id: `${this.id}-${this.packetCounter++}`,
+      id: packetId,
       type: PacketType.DATA,
       sourceId: this.id,
       destId,
@@ -472,5 +554,203 @@ export class MeshNode {
       originLng: this.estLng,
       gossipEntries: [],
     });
+
+    // Track sent message
+    this.sentMessages.push({
+      id: packetId,
+      toNodeId: destId,
+      text: cleanPayload,
+      timestamp: this.currentTick,
+      status: "sent",
+      hopCount: 0,
+    });
+  }
+
+  /**
+   * Update the status of a sent message (called by simulator when transmission completes).
+   */
+  recordTransmissionResult(packetId: string, status: "ok" | "collision" | "captured"): void {
+    const msg = this.sentMessages.find((m) => m.id === packetId);
+    if (msg) {
+      msg.status = status;
+    }
+  }
+
+  /* ── New Interface: loop() and userSend() ─────────────
+   * These methods provide the clean abstraction requested:
+   * - loop() runs each tick for background operations
+   * - userSend() simulates a user action
+   * ───────────────────────────────────────────────────── */
+
+  /**
+   * Main loop - runs every tick in the background.
+   * Handles protocol operations: beacons, routing, trust updates.
+   * This is called by the simulator each tick.
+   */
+  loop(currentTick: number): void {
+    // This wraps the existing tick() logic but provides 
+    // a cleaner interface for future extensions
+    this.tick(currentTick);
+
+    // Additional background tasks can go here
+    // E.g., trust score decay, security checks, etc.
+    this.updateReputationScores();
+  }
+
+  /**
+   * User-initiated send (e.g., from phone app via BLE).
+   * This is the interface for external message injection.
+   * 
+   * @param destId - Destination node ID
+   * @param message - Message text
+   * @param radio - Which radio to use ("BLE" for phone, "LoRa" for mesh)
+   */
+  userSend(destId: number, message: string, radio: RadioType = "LoRa"): void {
+    if (radio === "BLE" && !this.bleEnabled) {
+      this.notify("BLE is disabled on this node", "warn");
+      return;
+    }
+
+    // Sign message with our private key (simplified - in real impl would use actual crypto)
+    const signedMessage = this.signMessage(message);
+
+    // Enqueue for transmission
+    this.enqueueData(destId, signedMessage);
+
+    this.notify(`Sent message to Node ${destId} via ${radio}`, "info");
+  }
+
+  /* ── Trust & Crypto ───────────────────────────────────
+   * Simple trust system for demo purposes.
+   * Real implementation would use proper Ed25519 or similar.
+   * ───────────────────────────────────────────────────── */
+
+  private generatePublicKey(): string {
+    // Simplified: In reality would use proper crypto lib
+    return `PUB_${this.id}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  private generatePrivateKey(): string {
+    return `PRIV_${this.id}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  private signMessage(message: string): string {
+    // Simplified signing (in reality would use Ed25519 or ECDSA)
+    const signature = `SIG:${this.storage.privateKey.slice(0, 8)}`;
+    return `${message}|${signature}`;
+  }
+
+  /**
+   * Verify a message from another node using their public key.
+   */
+  verifyMessage(fromNodeId: number, signedMessage: string): boolean {
+    const peerKey = this.storage.trustedPeers.get(fromNodeId);
+    if (!peerKey) {
+      // Unknown peer - cannot verify
+      return false;
+    }
+
+    // Simplified verification
+    const [, signature] = signedMessage.split("|");
+    return signature?.startsWith("SIG:");
+  }
+
+  /**
+   * Add a trusted peer (manual trust establishment).
+   */
+  trustPeer(nodeId: number, publicKey: string): void {
+    this.storage.trustedPeers.set(nodeId, publicKey);
+    this.storage.reputationScores.set(nodeId, 0.5); // Start neutral
+    this.notify(`Added Node ${nodeId} to trusted peers`, "info");
+  }
+
+  /**
+   * Remove trust from a peer.
+   */
+  untrustPeer(nodeId: number): void {
+    this.storage.trustedPeers.delete(nodeId);
+    this.storage.reputationScores.delete(nodeId);
+    this.notify(`Removed Node ${nodeId} from trusted peers`, "warn");
+  }
+
+  /**
+   * Clear all trusted peers for this node.
+   */
+  clearTrustedPeers(): void {
+    this.storage.trustedPeers.clear();
+    this.storage.reputationScores.clear();
+    this.notify("Cleared all trusted peers", "warn");
+  }
+
+  /**
+   * Background reputation score updates.
+   */
+  private updateReputationScores(): void {
+    // Decay all reputation scores slightly over time
+    for (const [nodeId, score] of this.storage.reputationScores) {
+      // Decay toward 0.5 (neutral)
+      const newScore = score * 0.99 + 0.5 * 0.01;
+      this.storage.reputationScores.set(nodeId, newScore);
+    }
+  }
+
+  /**
+   * Get reputation score for a peer.
+   */
+  getReputation(nodeId: number): number {
+    return this.storage.reputationScores.get(nodeId) ?? 0.5;
+  }
+
+  /**
+   * Update reputation based on observed behavior.
+   */
+  updateReputation(nodeId: number, delta: number): void {
+    const current = this.getReputation(nodeId);
+    const updated = Math.max(0, Math.min(1, current + delta));
+    this.storage.reputationScores.set(nodeId, updated);
+  }
+
+  /**
+   * Check if a peer is trusted.
+   */
+  isTrusted(nodeId: number): boolean {
+    return this.storage.trustedPeers.has(nodeId);
+  }
+
+  /**
+   * Get this node's public key for sharing.
+   */
+  getPublicKey(): string {
+    return this.storage.publicKey;
+  }
+
+  /* ── Radio Management ─────────────────────────────────── */
+
+  /**
+   * Switch LoRa channel (for interference avoidance).
+   */
+  setLoRaChannel(channel: number): void {
+    if (channel < 0 || channel > 7) {
+      this.notify(`Invalid channel ${channel}`, "error");
+      return;
+    }
+    this.loraChannel = channel;
+    this.notify(`Switched to LoRa channel ${channel}`, "info");
+  }
+
+  /**
+   * Toggle BLE radio.
+   */
+  setBleEnabled(enabled: boolean): void {
+    this.bleEnabled = enabled;
+    this.notify(`BLE ${enabled ? "enabled" : "disabled"}`, "info");
+  }
+
+  /* ── Helpers ──────────────────────────────────────────── */
+
+  protected notify(message: string, level: "info" | "warn" | "error"): void {
+    if (this.onNotification) {
+      this.onNotification(message, level);
+    }
   }
 }

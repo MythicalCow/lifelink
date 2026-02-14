@@ -7,7 +7,21 @@ import type { SensorNode } from "@/types/sensor";
 
 const TICK_MS_BASE = 100; // 1x speed = 100ms per tick
 
-export function useSimulation(sensorNodes: SensorNode[]) {
+export interface SimulationHook {
+  state: SimState | null;
+  running: boolean;
+  speed: number;
+  play: () => void;
+  pause: () => void;
+  toggleSpeed: () => void;
+  stepOnce: () => void;
+  sendMessage: (from: number, to: number, text?: string, trackingId?: string) => void;
+  reset: () => void;
+  refreshState: () => void;
+  simRef: React.MutableRefObject<MeshSimulator | null>;
+}
+
+export function useSimulation(sensorNodes: SensorNode[]): SimulationHook {
   const simRef = useRef<MeshSimulator | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -48,9 +62,9 @@ export function useSimulation(sensorNodes: SensorNode[]) {
   }, []);
 
   const sendMessage = useCallback(
-    (fromId: number, toId: number, trackingId?: string) => {
+    (fromId: number, toId: number, text?: string, trackingId?: string) => {
       if (!simRef.current) return;
-      simRef.current.sendMessage(fromId, toId, "hello", trackingId);
+      simRef.current.sendMessage(fromId, toId, text || "hello", trackingId);
       // Queue only — lets users enqueue multiple simultaneous sends in the
       // same tick and observe collision behavior.
       const s = simRef.current.getState();
@@ -72,12 +86,26 @@ export function useSimulation(sensorNodes: SensorNode[]) {
     setState(simRef.current.getState());
   }, [sensorNodes]);
 
+  const refreshState = useCallback(() => {
+    if (!simRef.current) return;
+    const s = simRef.current.getState();
+    setState({ ...s, running, speed });
+  }, [running, speed]);
+
   // Step once on mount to get initial state
   useEffect(() => {
     if (simRef.current && !state) {
       setState(simRef.current.getState());
     }
   }, [state]);
+
+  useEffect(() => {
+    if (!simRef.current) return;
+    simRef.current.reset(sensorNodes);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRunning(false);
+    setState(simRef.current.getState());
+  }, [sensorNodes]);
 
   return {
     state,
@@ -89,5 +117,7 @@ export function useSimulation(sensorNodes: SensorNode[]) {
     stepOnce,
     sendMessage,
     reset,
+    refreshState,
+    simRef, // Expose simRef for advanced access
   };
 }

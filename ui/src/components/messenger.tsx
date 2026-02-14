@@ -15,6 +15,16 @@ import { haversine } from "@/simulation/utils";
 
 /* ── Exported types ────────────────────────────────────── */
 
+/**
+ * ChatMessage represents a message in the mesh network.
+ * 
+ * TTL (Time-To-Live) logic:
+ * - Messages include a TTL field (in ticks) and a sentAt timestamp (modulo day)
+ * - The sentAt timestamp is embedded in the message payload for network transmission
+ * - Mesh nodes should check the TTL and drop expired messages during routing
+ * - The UI also marks messages as failed client-side when TTL expires
+ * - This prevents stale messages from consuming network resources
+ */
 export interface ChatMessage {
   id: string;
   fromNodeId: number; // gateway node ID (BLE)
@@ -24,6 +34,8 @@ export interface ChatMessage {
   direction: "sent" | "received";
   status: "sending" | "routing" | "delivered" | "failed";
   hops?: number;
+  ttl?: number; // time-to-live in ticks
+  sentAt?: number; // timestamp modulo day (for network transmission)
 }
 
 /* ── Props ─────────────────────────────────────────────── */
@@ -33,8 +45,11 @@ interface MessengerProps {
   simState: SimState | null;
   messages: ChatMessage[];
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
-  msgCounter: MutableRefObject<number>;
-  onSendMessage: (from: number, to: number, trackingId?: string) => void;
+  msgCounterRef: MutableRefObject<number>;
+  onSendMessage: (from: number, to: number, text?: string, trackingId?: string) => void;
+  onRefresh?: () => void;
+  variant?: "full" | "panel";
+  allowAnyGateway?: boolean;
 }
 
 /* ── Constants ─────────────────────────────────────────── */
@@ -48,6 +63,15 @@ const USER_LNG = -122.1697;
  * Real hardware ≈ 30-50m; bumped for simulation demo.
  */
 const BLE_RANGE_M = 250;
+
+const QUICK_OPS = [
+  { id: "ping", label: "Ping", template: "op:ping" },
+  { id: "status", label: "Status", template: "op:status-check" },
+  { id: "rekey", label: "Rekey", template: "op:rekey-trust" },
+  { id: "rescan", label: "Rescan", template: "op:channel-scan" },
+  { id: "sync", label: "Sync", template: "op:time-sync" },
+  { id: "throttle", label: "Throttle", template: "op:rate-limit" },
+];
 
 /* ── Helpers ────────────────────────────────────────────── */
 
@@ -124,12 +148,40 @@ export function Messenger({
   simState,
   messages,
   setMessages,
-  msgCounter,
+  msgCounterRef,
   onSendMessage,
+  onRefresh,
+  variant = "full",
+  allowAnyGateway = false,
 }: MessengerProps) {
   const [selectedGateway, setSelectedGateway] = useState<number | null>(null);
   const [selectedDest, setSelectedDest] = useState<DestSelection>(null);
   const [draft, setDraft] = useState("");
+  const [gatewayMode, setGatewayMode] = useState<"ble" | "any">(
+    allowAnyGateway ? "any" : "ble",
+  );
+  const [scheduledMessages, setScheduledMessages] = useState<
+    Array<{
+      fromNodeId: number;
+      toNodeId: number;
+      text: string;
+      sendTick: number;
+    }>
+  >([]);
+  const [quickCount, setQuickCount] = useState(6);
+  const [quickMinOffset, setQuickMinOffset] = useState(2);
+  const [quickMaxOffset, setQuickMaxOffset] = useState(20);
+  const [quickMinBytes, setQuickMinBytes] = useState(8);
+  const [quickMaxBytes, setQuickMaxBytes] = useState(32);
+  const [quickTTL, setQuickTTL] = useState(5); // TTL in ticks (default 5)
+  const [quickSenderMode, setQuickSenderMode] = useState<"selected" | "random">(
+    "selected",
+  );
+  const [quickOps, setQuickOps] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = {};
+    for (const op of QUICK_OPS) initial[op.id] = true;
+    return initial;
+  });
   const threadRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -145,14 +197,11 @@ export function Messenger({
     [sortedNodes],
   );
 
-  // Auto-select nearest gateway
-  useEffect(() => {
-    if (selectedGateway === null && bleGateways.length > 0) {
-      setSelectedGateway(bleGateways[0].id);
-    }
-  }, [selectedGateway, bleGateways]);
+  const availableGateways = gatewayMode === "any" ? sortedNodes : bleGateways;
 
-  const gatewayNode = nodes.find((n) => n.id === selectedGateway) ?? null;
+  const activeGatewayId =
+    selectedGateway ?? (availableGateways[0]?.id ?? null);
+  const gatewayNode = nodes.find((n) => n.id === activeGatewayId) ?? null;
   const gatewayDist = gatewayNode ? Math.round(getDistance(gatewayNode)) : 0;
 
   /* ── Label resolver ──────────────────────────────────
@@ -162,21 +211,17 @@ export function Messenger({
    * "Node <id>" (undiscovered).
    * ─────────────────────────────────────────────────── */
   const gatewayState = simState?.nodeStates.find(
-    (n) => n.id === selectedGateway,
+    (n) => n.id === activeGatewayId,
   );
 
-  const resolveLabel = useMemo(() => {
-    const discovered = gatewayState?.discoveredLabels ?? {};
-    return (nodeId: number): string => {
-      // Gateway's own name
-      if (nodeId === selectedGateway && gatewayNode)
-        return gatewayNode.label ?? `Node ${nodeId}`;
-      // Gossip-discovered label
-      if (discovered[nodeId]) return discovered[nodeId];
-      // Undiscovered — show generic ID
-      return `Node ${nodeId}`;
-    };
-  }, [gatewayState?.discoveredLabels, selectedGateway, gatewayNode]);
+  const discovered = gatewayState?.discoveredLabels ?? {};
+  const resolveLabel = (nodeId: number): string => {
+    if (nodeId === activeGatewayId && gatewayNode) {
+      return gatewayNode.label ?? `Node ${nodeId}`;
+    }
+    if (discovered[nodeId]) return discovered[nodeId];
+    return `Node ${nodeId}`;
+  };
 
   // How many nodes has the gateway discovered?
   const discoveredCount = Object.keys(
@@ -187,13 +232,13 @@ export function Messenger({
   const destinations = useMemo(() => {
     const discovered = gatewayState?.discoveredLabels ?? {};
     return sortedNodes
-      .filter((n) => n.id !== selectedGateway)
+      .filter((n) => n.id !== activeGatewayId)
       .map((n) => ({
         ...n,
         discoveredLabel: discovered[n.id] ?? null,
         isDiscovered: n.id in discovered,
       }));
-  }, [sortedNodes, selectedGateway, gatewayState?.discoveredLabels]);
+  }, [sortedNodes, activeGatewayId, gatewayState?.discoveredLabels]);
 
   // Auto-scroll
   useEffect(() => {
@@ -216,11 +261,18 @@ export function Messenger({
         ? enrichedMessages.filter(
             (m) =>
               (m.toNodeId === selectedDest &&
-                m.fromNodeId === selectedGateway) ||
+                m.fromNodeId === activeGatewayId) ||
               (m.fromNodeId === selectedDest &&
-                m.toNodeId === selectedGateway),
+                m.toNodeId === activeGatewayId),
           )
         : [];
+
+  const sentMessages = enrichedMessages.filter(
+    (msg) => msg.direction === "sent",
+  );
+  const receivedMessages = enrichedMessages.filter(
+    (msg) => msg.direction === "received",
+  );
 
   const handleSend = () => {
     if (
@@ -231,22 +283,85 @@ export function Messenger({
     )
       return;
 
-    const id = `msg-${++msgCounter.current}`;
+    const currentTick = simState?.tick ?? 0;
+    const sentAt = currentTick % 86400; // timestamp modulo day
+    const id = `msg-${++msgCounterRef.current}`;
     const msg: ChatMessage = {
       id,
       fromNodeId: gatewayNode.id,
       toNodeId: selectedDest,
       text: draft.trim(),
-      timestamp: simState?.tick ?? 0,
+      timestamp: currentTick,
       direction: "sent",
       status: "sending",
+      ttl: quickTTL,
+      sentAt,
     };
 
     setMessages((prev) => [...prev, msg]);
-    onSendMessage(gatewayNode.id, selectedDest, id);
+    onSendMessage(gatewayNode.id, selectedDest, draft.trim(), id);
     setDraft("");
     inputRef.current?.focus();
   };
+
+  useEffect(() => {
+    if (!simState || scheduledMessages.length === 0) return;
+    const tick = simState.tick;
+    const due = scheduledMessages.filter((msg) => msg.sendTick <= tick);
+    if (due.length === 0) return;
+
+    const timer = setTimeout(() => {
+      setScheduledMessages((prev) =>
+        prev.filter((msg) => msg.sendTick > tick),
+      );
+
+      for (const msg of due) {
+        const id = `msg-${++msgCounterRef.current}`;
+        const sentAt = msg.sendTick % 86400;
+        const entry: ChatMessage = {
+          id,
+          fromNodeId: msg.fromNodeId,
+          toNodeId: msg.toNodeId,
+          text: msg.text,
+          timestamp: msg.sendTick,
+          direction: "sent",
+          status: "sending",
+          ttl: quickTTL,
+          sentAt,
+        };
+        setMessages((prev) => [...prev, entry]);
+        onSendMessage(msg.fromNodeId, msg.toNodeId, msg.text, id);
+      }
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [simState, scheduledMessages, onSendMessage, setMessages, msgCounterRef, quickTTL]);
+
+  // Check for expired messages based on TTL
+  useEffect(() => {
+    if (!simState) return;
+    const currentTick = simState.tick;
+    
+    setMessages((prev) => {
+      let hasChanges = false;
+      const updated = prev.map((msg) => {
+        // Only check messages that are still in transit
+        if (msg.status !== "sending" && msg.status !== "routing") {
+          return msg;
+        }
+        
+        // Check if message has expired
+        if (msg.ttl && currentTick - msg.timestamp >= msg.ttl) {
+          hasChanges = true;
+          return { ...msg, status: "failed" as const };
+        }
+        
+        return msg;
+      });
+      
+      return hasChanges ? updated : prev;
+    });
+  }, [simState, setMessages]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -275,60 +390,575 @@ export function Messenger({
     selectedDest !== "all" &&
     gatewayNode !== null;
 
-  return (
-    <div className="absolute inset-0 top-16 bottom-10 z-[500] flex flex-col">
-      {/* ── Gateway selector (BLE) ──────────────────────── */}
-      <div className="mx-auto w-full max-w-lg px-4 pt-2">
-        <div className="flex items-center gap-2 pb-1.5">
-          <span className="text-[10px] font-semibold tracking-wide text-blue-500/80 uppercase">
-            📱 Your gateway
-          </span>
-          <span className="text-[10px] text-[var(--muted)]/50">BLE</span>
-        </div>
+  const quickOpChoices = QUICK_OPS.filter((op) => quickOps[op.id]);
+  const canQuickAdd =
+    quickCount > 0 &&
+    quickMinOffset >= 0 &&
+    quickMaxOffset >= quickMinOffset &&
+    quickMinBytes > 0 &&
+    quickMaxBytes >= quickMinBytes &&
+    quickTTL > 0 &&
+    quickOpChoices.length > 0 &&
+    nodes.length > 0;
+  const isPanel = variant === "panel";
 
-        <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
-          {bleGateways.length === 0 ? (
-            <span className="text-[11px] text-[var(--muted)]">
-              No nodes in BLE range ({BLE_RANGE_M}m)
-            </span>
-          ) : (
-            bleGateways.map((node) => {
-              const dist = Math.round(getDistance(node));
-              const isSelected = selectedGateway === node.id;
-              return (
-                <button
-                  key={node.id}
-                  onClick={() => setSelectedGateway(node.id)}
-                  className={`flex shrink-0 flex-col items-start gap-1 rounded-xl px-4 py-2.5 transition-all duration-150 ${
-                    isSelected
-                      ? "bg-blue-500/10 ring-1.5 ring-blue-500/40"
-                      : "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
-                  }`}
-                >
-                  <span
-                    className={`text-[11px] font-medium leading-tight ${
-                      isSelected
-                        ? "text-blue-600"
-                        : "text-[var(--foreground)]"
+  const handleQueueRandomMessages = () => {
+    if (!simState || !canQuickAdd) return;
+    const tick = simState.tick;
+    const newMessages: Array<{
+      fromNodeId: number;
+      toNodeId: number;
+      text: string;
+      sendTick: number;
+    }> = [];
+
+    for (let i = 0; i < quickCount; i++) {
+      const offset =
+        quickMinOffset +
+        Math.floor(Math.random() * (quickMaxOffset - quickMinOffset + 1));
+      const op =
+        quickOpChoices[Math.floor(Math.random() * quickOpChoices.length)];
+
+      // Generate random bytes
+      const byteLength =
+        quickMinBytes +
+        Math.floor(Math.random() * (quickMaxBytes - quickMinBytes + 1));
+      const randomBytes = Array.from({ length: byteLength }, () =>
+        Math.floor(Math.random() * 256)
+          .toString(16)
+          .padStart(2, "0")
+      ).join("");
+
+      let fromNodeId: number;
+      if (quickSenderMode === "selected" && activeGatewayId !== null) {
+        fromNodeId = activeGatewayId;
+      } else {
+        const sender = nodes[Math.floor(Math.random() * nodes.length)];
+        fromNodeId = sender.id;
+      }
+
+      const candidates = nodes.filter((n) => n.id !== fromNodeId);
+      if (candidates.length === 0) continue;
+      const dest = candidates[Math.floor(Math.random() * candidates.length)];
+      
+      // Calculate timestamp modulo day (86400 ticks) for network transmission
+      const sentAt = (tick + offset) % 86400;
+      
+      newMessages.push({
+        fromNodeId,
+        toNodeId: dest.id,
+        text: `${op.template}:ts=${sentAt}:ttl=${quickTTL}:${randomBytes}`,
+        sendTick: tick + offset,
+      });
+    }
+
+    setScheduledMessages((prev) => [...prev, ...newMessages]);
+  };
+
+
+
+  return (
+    <div
+      className={`relative flex flex-col ${
+        variant === "panel"
+          ? "h-full w-full"
+          : "absolute inset-0 top-16 bottom-10 z-[500]"
+      }`}
+    >
+      {/* ── Refresh button ──────────────────────────────── */}
+      {onRefresh && messages.length > 0 && (
+        <div className="absolute top-2 right-4 z-[1000]">
+          <button
+            onClick={onRefresh}
+            className="rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-[10px] font-medium text-[var(--accent)] shadow-sm backdrop-blur-sm transition-colors hover:bg-[var(--accent)]/20"
+          >
+            🔄 Clear Messages
+          </button>
+        </div>
+      )}
+
+      <div className={isPanel ? "flex min-h-0 flex-1 gap-5 px-4 pb-4 pt-2" : "flex flex-col"}>
+        <div className={isPanel ? "flex w-[320px] shrink-0 flex-col gap-4 overflow-y-auto" : ""}>
+          {/* ── Gateway selector (BLE) ──────────────────────── */}
+          <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4 pt-2"}>
+            {allowAnyGateway && (
+              <div className="flex items-center justify-between pb-2">
+                <span className="text-[10px] font-semibold tracking-wide text-[var(--muted)] uppercase">
+                  Gateway Mode
+                </span>
+                <div className="flex items-center gap-2 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
+                  <button
+                    onClick={() => setGatewayMode("ble")}
+                    className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors ${
+                      gatewayMode === "ble"
+                        ? "bg-white text-[var(--foreground)]"
+                        : "text-[var(--muted)]"
                     }`}
                   >
-                    {node.label}
-                  </span>
-                  <span className="flex items-center gap-2">
-                    <span className="text-[10px] tabular-nums text-[var(--muted)]">
-                      {dist}m
-                    </span>
-                    <BleIndicator dist={dist} />
-                  </span>
-                </button>
-              );
-            })
-          )}
-        </div>
-      </div>
+                    BLE Range
+                  </button>
+                  <button
+                    onClick={() => setGatewayMode("any")}
+                    className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors ${
+                      gatewayMode === "any"
+                        ? "bg-white text-[var(--foreground)]"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    Any Node
+                  </button>
+                </div>
+              </div>
+            )}
 
-      {/* ── Destination selector (LoRa mesh) ───────────── */}
-      <div className="mx-auto w-full max-w-lg px-4">
+            <div className="flex items-center gap-2 pb-1.5">
+              <span className="text-[10px] font-semibold tracking-wide text-blue-500/80 uppercase">
+                {gatewayMode === "any" ? "🧭 Act as node" : "📱 Your gateway"}
+              </span>
+              <span className="text-[10px] text-[var(--muted)]/50">
+                {gatewayMode === "any" ? "override" : "BLE"}
+              </span>
+            </div>
+
+            <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
+              {availableGateways.length === 0 ? (
+                <span className="text-[11px] text-[var(--muted)]">
+                  {gatewayMode === "any"
+                    ? "No nodes available"
+                    : `No nodes in BLE range (${BLE_RANGE_M}m)`}
+                </span>
+              ) : (
+                availableGateways.map((node) => {
+                  const dist = Math.round(getDistance(node));
+                  const isSelected = activeGatewayId === node.id;
+                  return (
+                    <button
+                      key={node.id}
+                      onClick={() => setSelectedGateway(node.id)}
+                      className={`flex shrink-0 flex-col items-start gap-1 rounded-xl px-4 py-2.5 transition-all duration-150 ${
+                        isSelected
+                          ? "bg-blue-500/10 ring-1.5 ring-blue-500/40"
+                          : "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
+                      }`}
+                    >
+                      <span
+                        className={`text-[11px] font-medium leading-tight ${
+                          isSelected
+                            ? "text-blue-600"
+                            : "text-[var(--foreground)]"
+                        }`}
+                      >
+                        {node.label}
+                      </span>
+                      <span className="flex items-center gap-2">
+                        <span className="text-[10px] tabular-nums text-[var(--muted)]">
+                          {dist}m
+                        </span>
+                        {gatewayMode === "ble" && <BleIndicator dist={dist} />}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* ── Quick add random messages ────────────────── */}
+          <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
+            <div className="flex items-center justify-between pb-1.5">
+              <span className="text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase">
+                ⚡ Quick add
+              </span>
+              <span className="text-[10px] text-[var(--muted)]/50">
+                {scheduledMessages.length} queued
+              </span>
+            </div>
+
+            <div className="rounded-xl border border-[var(--foreground)]/[0.06] bg-[var(--foreground)]/[0.03] p-3">
+              <div className="grid grid-cols-3 gap-2 text-[10px]">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[var(--muted)]">Count</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={quickCount}
+                    onChange={(e) => setQuickCount(parseInt(e.target.value) || 1)}
+                    className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[var(--muted)]">Min tick</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={999}
+                    value={quickMinOffset}
+                    onChange={(e) => setQuickMinOffset(parseInt(e.target.value) || 0)}
+                    className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[var(--muted)]">Max tick</span>
+                  <input
+                    type="number"
+                    min={quickMinOffset}
+                    max={999}
+                    value={quickMaxOffset}
+                    onChange={(e) => setQuickMaxOffset(parseInt(e.target.value) || quickMinOffset)}
+                    className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[var(--muted)]">Min bytes</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={256}
+                    value={quickMinBytes}
+                    onChange={(e) => setQuickMinBytes(parseInt(e.target.value) || 1)}
+                    className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[var(--muted)]">Max bytes</span>
+                  <input
+                    type="number"
+                    min={quickMinBytes}
+                    max={256}
+                    value={quickMaxBytes}
+                    onChange={(e) => setQuickMaxBytes(parseInt(e.target.value) || quickMinBytes)}
+                    className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[var(--muted)]">TTL (ticks)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={quickTTL}
+                    onChange={(e) => setQuickTTL(parseInt(e.target.value) || 1)}
+                    className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
+                    title="Time-to-live: messages expire after this many ticks"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-[var(--muted)]">Sender</span>
+                  <div className="flex items-center gap-1 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
+                    <button
+                      onClick={() => setQuickSenderMode("selected")}
+                      className={`rounded-full px-2 py-1 text-[10px] font-medium ${
+                        quickSenderMode === "selected"
+                          ? "bg-white text-[var(--foreground)]"
+                          : "text-[var(--muted)]"
+                      }`}
+                    >
+                      Selected
+                    </button>
+                    <button
+                      onClick={() => setQuickSenderMode("random")}
+                      className={`rounded-full px-2 py-1 text-[10px] font-medium ${
+                        quickSenderMode === "random"
+                          ? "bg-white text-[var(--foreground)]"
+                          : "text-[var(--muted)]"
+                      }`}
+                    >
+                      Random
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleQueueRandomMessages}
+                  disabled={!canQuickAdd}
+                  className={`rounded-lg px-3 py-1.5 text-[10px] font-medium transition-colors ${
+                    canQuickAdd
+                      ? "bg-[var(--accent)] text-white"
+                      : "bg-[var(--foreground)]/[0.06] text-[var(--muted)]/50 cursor-not-allowed"
+                  }`}
+                >
+                  Queue Messages
+                </button>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {QUICK_OPS.map((op) => (
+                  <label
+                    key={op.id}
+                    className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] ${
+                      quickOps[op.id]
+                        ? "border-blue-500/40 bg-blue-500/10 text-blue-600"
+                        : "border-[var(--foreground)]/[0.08] text-[var(--muted)]"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={quickOps[op.id]}
+                      onChange={(e) =>
+                        setQuickOps((prev) => ({
+                          ...prev,
+                          [op.id]: e.target.checked,
+                        }))
+                      }
+                      className="h-3 w-3"
+                    />
+                    {op.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Global message queue ───────────────────────── */}
+          <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
+            <div className="flex items-center justify-between pb-1.5">
+              <span className="text-[10px] font-semibold tracking-wide text-[var(--foreground)]/70 uppercase">
+                📬 Message Queue
+              </span>
+              <div className="flex items-center gap-2 text-[10px]">
+                <span className="text-[var(--suggest)]">
+                  {messages.filter(m => m.status === "sending" || m.status === "routing").length} active
+                </span>
+                {messages.filter(m => m.status === "failed").length > 0 && (
+                  <>
+                    <span className="text-[var(--muted)]/30">·</span>
+                    <span className="text-red-500/70">
+                      {messages.filter(m => m.status === "failed").length} failed
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="max-h-[320px] overflow-y-auto rounded-xl border border-[var(--foreground)]/[0.06] bg-[var(--foreground)]/[0.02] scrollbar-thin">
+              {/* Queued messages (not yet sent) */}
+              {scheduledMessages.length > 0 && (
+                <div className="border-b border-[var(--foreground)]/[0.04] p-2">
+                  <div className="pb-1.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--muted)]/60">
+                    Queued ({scheduledMessages.length})
+                  </div>
+                  {scheduledMessages
+                    .sort((a, b) => a.sendTick - b.sendTick)
+                    .slice(0, 10)
+                    .map((msg, idx) => {
+                      const node = nodes.find(n => n.id === msg.fromNodeId);
+                      const dest = nodes.find(n => n.id === msg.toNodeId);
+                      const ticksUntil = msg.sendTick - (simState?.tick ?? 0);
+                      return (
+                        <div
+                          key={`queued-${idx}`}
+                          className="mb-1.5 rounded-lg bg-white/40 p-2 text-[10px]"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 text-[9px] text-[var(--foreground)]/60">
+                                <span className="font-medium">{node?.label ?? `Node ${msg.fromNodeId}`}</span>
+                                <span className="text-[var(--muted)]/40">→</span>
+                                <span className="font-medium">{dest?.label ?? `Node ${msg.toNodeId}`}</span>
+                              </div>
+                              <div className="truncate text-[9px] text-[var(--muted)]/70">
+                                {msg.text}
+                              </div>
+                            </div>
+                            <span className="shrink-0 text-[9px] text-[var(--muted)]/50">
+                              T+{ticksUntil}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  {scheduledMessages.length > 10 && (
+                    <div className="text-center text-[9px] text-[var(--muted)]/40">
+                      +{scheduledMessages.length - 10} more
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* In-flight messages */}
+              {messages.filter(m => m.status === "sending" || m.status === "routing").length > 0 && (
+                <div className="border-b border-[var(--foreground)]/[0.04] p-2">
+                  <div className="pb-1.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--suggest)]/70">
+                    In Flight ({messages.filter(m => m.status === "sending" || m.status === "routing").length})
+                  </div>
+                  {messages
+                    .filter(m => m.status === "sending" || m.status === "routing")
+                    .slice(-8)
+                    .reverse()
+                    .map((msg) => {
+                      const sender = nodes.find(n => n.id === msg.fromNodeId);
+                      const receiver = nodes.find(n => n.id === msg.toNodeId);
+                      const ticksInFlight = (simState?.tick ?? 0) - msg.timestamp;
+                      const messageBytes = Math.ceil(msg.text.length / 2);
+                      const estimatedTotalTicks = Math.max(3, Math.ceil(messageBytes / 8));
+                      const progress = Math.min(100, (ticksInFlight / estimatedTotalTicks) * 100);
+                      const bytesSent = Math.min(messageBytes, Math.floor((ticksInFlight / estimatedTotalTicks) * messageBytes));
+                      const ttlRemaining = msg.ttl ? msg.ttl - ticksInFlight : null;
+                      const isNearExpiry = ttlRemaining !== null && ttlRemaining <= 2;
+                      
+                      return (
+                        <div
+                          key={msg.id}
+                          className={`mb-1.5 rounded-lg p-2 text-[10px] ${
+                            isNearExpiry 
+                              ? "bg-red-500/10 ring-1 ring-red-500/20" 
+                              : "bg-[var(--suggest)]/5"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 text-[9px]">
+                                <span className="font-medium text-[var(--foreground)]/70">
+                                  {sender?.label ?? `Node ${msg.fromNodeId}`}
+                                </span>
+                                <span className="text-[var(--muted)]/40">→</span>
+                                <span className="font-medium text-[var(--foreground)]/70">
+                                  {receiver?.label ?? `Node ${msg.toNodeId}`}
+                                </span>
+                                {ttlRemaining !== null && (
+                                  <span className={`text-[8px] tabular-nums ${
+                                    isNearExpiry ? "text-red-500 font-bold" : "text-[var(--muted)]/50"
+                                  }`}>
+                                    {ttlRemaining}⏱
+                                  </span>
+                                )}
+                              </div>
+                              <div className="truncate text-[9px] text-[var(--muted)]/60">
+                                {msg.text}
+                              </div>
+                              <div className="mt-1.5 flex items-center gap-2">
+                                <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--foreground)]/[0.08]">
+                                  <div
+                                    className={`h-full transition-all duration-300 ${
+                                      isNearExpiry ? "bg-red-500" : "bg-[var(--suggest)]"
+                                    }`}
+                                    style={{ width: `${progress}%` }}
+                                  />
+                                </div>
+                                <span className="shrink-0 text-[8px] tabular-nums text-[var(--muted)]/50">
+                                  {bytesSent}/{messageBytes}B
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+
+              {/* Failed messages */}
+              {messages.filter(m => m.status === "failed").length > 0 && (
+                <div className="border-b border-[var(--foreground)]/[0.04] p-2">
+                  <div className="pb-1.5 text-[9px] font-semibold uppercase tracking-wide text-red-500/70">
+                    Failed / Expired ({messages.filter(m => m.status === "failed").length})
+                  </div>
+                  {messages
+                    .filter(m => m.status === "failed")
+                    .slice(-5)
+                    .reverse()
+                    .map((msg) => {
+                      const sender = nodes.find(n => n.id === msg.fromNodeId);
+                      const receiver = nodes.find(n => n.id === msg.toNodeId);
+                      const messageBytes = Math.ceil(msg.text.length / 2);
+                      
+                      return (
+                        <div
+                          key={msg.id}
+                          className="mb-1 rounded-lg bg-red-500/5 p-1.5 text-[10px]"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 text-[9px] text-red-500/70">
+                                <span>{sender?.label ?? `Node ${msg.fromNodeId}`}</span>
+                                <span>→</span>
+                                <span>{receiver?.label ?? `Node ${msg.toNodeId}`}</span>
+                                <span className="text-[8px]">✗</span>
+                                {msg.ttl && <span className="text-[8px]">TTL:{msg.ttl}</span>}
+                              </div>
+                            </div>
+                            <span className="shrink-0 text-[8px] tabular-nums text-red-500/40">
+                              {messageBytes}B
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  {messages.filter(m => m.status === "failed").length > 5 && (
+                    <div className="text-center text-[9px] text-[var(--muted)]/40">
+                      +{messages.filter(m => m.status === "failed").length - 5} more
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Delivered messages */}
+              {messages.filter(m => m.status === "delivered").length > 0 && (
+                <div className="p-2">
+                  <div className="pb-1.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--accent)]/60">
+                    Delivered ({messages.filter(m => m.status === "delivered").length})
+                  </div>
+                  {messages
+                    .filter(m => m.status === "delivered")
+                    .slice(-5)
+                    .reverse()
+                    .map((msg) => {
+                      const sender = nodes.find(n => n.id === msg.fromNodeId);
+                      const receiver = nodes.find(n => n.id === msg.toNodeId);
+                      const messageBytes = Math.ceil(msg.text.length / 2);
+                      
+                      return (
+                        <div
+                          key={msg.id}
+                          className="mb-1 rounded-lg bg-[var(--accent)]/5 p-1.5 text-[10px]"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 text-[9px] text-[var(--muted)]/50">
+                                <span>{sender?.label ?? `Node ${msg.fromNodeId}`}</span>
+                                <span>→</span>
+                                <span>{receiver?.label ?? `Node ${msg.toNodeId}`}</span>
+                                <span className="text-[8px]">✓</span>
+                              </div>
+                            </div>
+                            <span className="shrink-0 text-[8px] tabular-nums text-[var(--muted)]/40">
+                              {messageBytes}B
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  {messages.filter(m => m.status === "delivered").length > 5 && (
+                    <div className="text-center text-[9px] text-[var(--muted)]/40">
+                      +{messages.filter(m => m.status === "delivered").length - 5} more
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Empty state */}
+              {messages.length === 0 && scheduledMessages.length === 0 && (
+                <div className="flex flex-col items-center justify-center gap-1 p-6 text-center">
+                  <span className="text-lg">📭</span>
+                  <span className="text-[10px] text-[var(--muted)]/50">
+                    No messages queued
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className={isPanel ? "flex min-w-0 flex-1 flex-col" : ""}>
+          {/* ── Destination selector (LoRa mesh) ───────────── */}
+          <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
         <div className="flex items-center gap-2 pb-1.5">
           <span className="text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase">
             📡 Send to
@@ -372,9 +1002,9 @@ export function Messenger({
             const threadCount = messages.filter(
               (m) =>
                 (m.toNodeId === node.id &&
-                  m.fromNodeId === selectedGateway) ||
-                (m.fromNodeId === node.id &&
-                  m.toNodeId === selectedGateway),
+                    m.fromNodeId === activeGatewayId) ||
+                  (m.fromNodeId === node.id &&
+                    m.toNodeId === activeGatewayId),
             ).length;
             return (
               <button
@@ -428,14 +1058,18 @@ export function Messenger({
       </div>
 
       {/* ── Divider ────────────────────────────────────── */}
-      <div className="mx-auto w-full max-w-lg px-6">
+      <div className={isPanel ? "w-full px-1" : "mx-auto w-full max-w-lg px-6"}>
         <div className="h-px bg-[var(--foreground)]/[0.06]" />
       </div>
 
       {/* ── Thread / log area ──────────────────────────── */}
       <div
         ref={threadRef}
-        className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-2 overflow-y-auto px-6 py-4 scrollbar-none"
+        className={`flex w-full flex-1 flex-col gap-2 overflow-y-auto scrollbar-none ${
+          isPanel
+            ? "min-h-0 px-2 py-4"
+            : "mx-auto max-w-lg px-6 py-4"
+        }`}
       >
         {selectedDest === null ? (
           <EmptyState
@@ -443,41 +1077,113 @@ export function Messenger({
             title="Select a destination"
             description="Pick a gateway above (BLE), then choose where to send via the LoRa mesh. Node names appear as gossip heartbeats propagate."
           />
-        ) : selectedDest === "all" && threadMessages.length === 0 ? (
-          <EmptyState
-            icon="📋"
-            title="No messages yet"
-            description="Send a message to any node and it will appear in the log."
-          />
-        ) : selectedDest !== "all" && threadMessages.length === 0 ? (
-          <EmptyState
-            icon="💬"
-            title="No messages yet"
-            description={`Send your first message to ${selectedNodeLabel}`}
-          />
         ) : selectedDest === "all" ? (
-          threadMessages.map((msg) => (
-            <LogEntry
-              key={msg.id}
-              message={msg}
-              resolveLabel={resolveLabel}
+          threadMessages.length === 0 ? (
+            <EmptyState
+              icon="📋"
+              title="No messages yet"
+              description="Send a message to any node and it will appear in the log."
             />
-          ))
+          ) : (
+            threadMessages.map((msg) => (
+              <LogEntry
+                key={msg.id}
+                message={msg}
+                resolveLabel={resolveLabel}
+              />
+            ))
+          )
         ) : (
-          threadMessages.map((msg) => (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              resolveLabel={resolveLabel}
-              gatewayLabel={gatewayNode?.label}
-            />
-          ))
+          <div className="grid gap-4 md:grid-cols-2">
+            <section className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-4">
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-blue-500/20">
+                <h3 className="text-sm font-semibold text-[var(--foreground)]">
+                  Send
+                </h3>
+                <span className="text-xs text-[var(--foreground)]/60">
+                  {sentMessages.length} total
+                </span>
+              </div>
+              {sentMessages.length === 0 ? (
+                <div className="py-6 text-center text-xs text-[var(--foreground)]/60">
+                  No outgoing messages yet
+                </div>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {sentMessages.map((msg) => {
+                    const status = getStatusDisplay(msg.status);
+                    return (
+                      <div
+                        key={msg.id}
+                        className="rounded-md border border-blue-500/20 bg-[var(--surface)]/60 p-3"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs text-[var(--foreground)]/60">
+                          <span className={`font-semibold ${status.color}`}>
+                            {status.text}
+                          </span>
+                          <span>Tick {msg.timestamp}</span>
+                        </div>
+                        <div className="mt-2 text-sm font-mono text-[var(--foreground)] break-words">
+                          {msg.text || "(empty)"}
+                        </div>
+                        <div className="mt-2 text-xs text-[var(--foreground)]/60">
+                          To: {resolveLabel(msg.toNodeId)} | Hops: {msg.hops ?? 0}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            <section className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-green-500/20">
+                <h3 className="text-sm font-semibold text-[var(--foreground)]">
+                  Receive
+                </h3>
+                <span className="text-xs text-[var(--foreground)]/60">
+                  {receivedMessages.length} total
+                </span>
+              </div>
+              {receivedMessages.length === 0 ? (
+                <div className="py-6 text-center text-xs text-[var(--foreground)]/60">
+                  No incoming messages yet
+                </div>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {receivedMessages.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className="rounded-md border border-green-500/20 bg-[var(--surface)]/60 p-3"
+                    >
+                      <div className="flex items-center justify-between gap-2 text-xs text-[var(--foreground)]/60">
+                        <span className="font-semibold text-green-500">
+                          RECEIVED
+                        </span>
+                        <span>Tick {msg.timestamp}</span>
+                      </div>
+                      <div className="mt-2 text-sm font-mono text-[var(--foreground)] break-words">
+                        {msg.text || "(empty)"}
+                      </div>
+                      <div className="mt-2 text-xs text-[var(--foreground)]/60">
+                        From: {resolveLabel(msg.fromNodeId)} | Hops: {msg.hops ?? 0}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
         )}
       </div>
 
       {/* ── Summary bar ────────────────────────────────── */}
       {messages.length > 0 && (
-        <div className="mx-auto flex w-full max-w-lg items-center justify-center gap-4 px-6 py-1.5">
+        <div
+          className={`flex w-full items-center justify-center gap-4 py-1.5 ${
+            isPanel ? "px-2" : "mx-auto max-w-lg px-6"
+          }`}
+        >
           <span className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
             {deliveredCount} delivered
@@ -495,7 +1201,7 @@ export function Messenger({
       )}
 
       {/* ── Route path + Composer ───────────────────────── */}
-      <div className="mx-auto w-full max-w-lg px-4 pb-2">
+      <div className={isPanel ? "w-full px-2 pb-2" : "mx-auto w-full max-w-lg px-4 pb-2"}>
         {/* Route visualization */}
         {gatewayNode &&
           selectedDest !== null &&
@@ -542,7 +1248,9 @@ export function Messenger({
             }
             placeholder={
               !gatewayNode
-                ? "No gateway in BLE range"
+                ? gatewayMode === "any"
+                  ? "Select a node to act as"
+                  : "No gateway in BLE range"
                 : selectedDest !== null && selectedDest !== "all"
                   ? `Message ${selectedNodeLabel} via ${gatewayNode.label}…`
                   : selectedDest === "all"
@@ -580,10 +1288,13 @@ export function Messenger({
         {/* BLE connection hint */}
         {gatewayNode && (
           <p className="mt-1 text-center text-[10px] text-[var(--muted)]/40">
-            {gatewayDist}m to {gatewayNode.label} via Bluetooth ·{" "}
-            {bleSignal(gatewayDist).label}
+            {gatewayMode === "ble"
+              ? `${gatewayDist}m to ${gatewayNode.label} via Bluetooth · ${bleSignal(gatewayDist).label}`
+              : `Acting as ${gatewayNode.label} (simulation override)`}
           </p>
         )}
+      </div>
+        </div>
       </div>
     </div>
   );
@@ -609,68 +1320,6 @@ function EmptyState({
       <span className="max-w-64 text-xs leading-relaxed text-[var(--muted)]">
         {description}
       </span>
-    </div>
-  );
-}
-
-/* ── Message Bubble (chat view) ────────────────────────── */
-
-function MessageBubble({
-  message,
-  resolveLabel,
-  gatewayLabel,
-}: {
-  message: ChatMessage;
-  resolveLabel: (id: number) => string;
-  gatewayLabel?: string;
-}) {
-  const isSent = message.direction === "sent";
-  const destLabel = resolveLabel(message.toNodeId);
-
-  const {
-    text: statusText,
-    color: statusColor,
-    icon: statusIcon,
-  } = getStatusDisplay(message.status);
-
-  return (
-    <div
-      className={`flex flex-col gap-0.5 ${isSent ? "items-end" : "items-start"}`}
-    >
-      {!isSent && (
-        <span className="px-3 text-[10px] font-medium text-[var(--muted)]">
-          {resolveLabel(message.fromNodeId)}
-        </span>
-      )}
-
-      <div
-        className={`max-w-[75%] rounded-2xl px-4 py-2.5 ${
-          isSent
-            ? "rounded-br-md bg-[var(--accent)] text-white"
-            : "rounded-bl-md bg-[var(--foreground)]/[0.06] text-[var(--foreground)]"
-        }`}
-      >
-        <p className="text-sm leading-relaxed">{message.text}</p>
-      </div>
-
-      {isSent && (
-        <span
-          className={`flex items-center gap-1 px-1 text-[10px] ${statusColor}`}
-        >
-          <span>{statusIcon}</span>
-          {statusText}
-          {message.status === "delivered" && (
-            <span className="text-[var(--muted)]">
-              · via {gatewayLabel ?? "gateway"} → {destLabel}
-            </span>
-          )}
-          {message.status === "routing" && gatewayLabel && (
-            <span className="text-[var(--muted)]/60">
-              · from {gatewayLabel}
-            </span>
-          )}
-        </span>
-      )}
     </div>
   );
 }

@@ -9,7 +9,6 @@ import {
   Polyline,
   Tooltip,
 } from "react-leaflet";
-import type { SuggestedNode } from "@/types/sensor";
 import type { SimState, Transmission, NodeVisualState } from "@/simulation/types";
 import { PacketType } from "@/simulation/types";
 import "leaflet/dist/leaflet.css";
@@ -17,21 +16,15 @@ import "leaflet/dist/leaflet.css";
 interface LeafletMapProps {
   center: [number, number];
   zoom: number;
-  suggestions: SuggestedNode[];
   simState: SimState | null;
+  mapKey?: number;
+  showGodMode?: boolean;
 }
 
 /** Map node visual state → color */
 function nodeColor(ns: NodeVisualState | undefined): string {
-  if (!ns) return "#6b9e8a";
-  switch (ns.state) {
-    case "tx":
-      return "#4ade80"; // bright green
-    case "rx":
-      return "#60a5fa"; // blue
-    default:
-      return "#6b9e8a"; // sage
-  }
+  if (!ns) return "#2563eb";
+  return "#2563eb";
 }
 
 /** Map node state → border weight */
@@ -40,19 +33,29 @@ function nodeWeight(ns: NodeVisualState | undefined): number {
   return ns.state === "idle" ? 2 : 3;
 }
 
-/** Transmission line color by packet type / outcome */
+/** Transmission line color by channel (green -> yellow family) */
+function txColorByChannel(channel: number): string {
+  const colors = [
+    "#22c55e", // green - ch 0
+    "#4ade80", // lighter green - ch 1
+    "#84cc16", // lime - ch 2
+    "#a3e635", // lighter lime - ch 3
+    "#bef264", // yellow-green - ch 4
+    "#facc15", // yellow - ch 5
+    "#fde047", // lighter yellow - ch 6
+    "#fef08a", // pale yellow - ch 7
+  ];
+  return colors[channel % colors.length];
+}
+
+/** Transmission line color */
 function txColor(tx: Transmission): string {
+  // Collisions and captures get special colors
   if (tx.status === "collision") return "#ef4444";
   if (tx.status === "captured") return "#f59e0b";
-
-  switch (tx.packetType) {
-    case PacketType.HEARTBEAT:
-      return "#6b9e8a";
-    case PacketType.DATA:
-      return "#3b82f6";
-    case PacketType.ACK:
-      return "#4ade80";
-  }
+  
+  // Normal transmissions use channel colors
+  return txColorByChannel(tx.channel);
 }
 
 function txOpacity(tx: Transmission): number {
@@ -68,9 +71,12 @@ function txWeight(tx: Transmission): number {
 }
 
 function txDashArray(tx: Transmission): string | undefined {
-  if (tx.status === "collision") return "2 4";
-  if (tx.packetType === PacketType.HEARTBEAT) return "3 4";
-  return undefined;
+  // Malicious transmissions: dotted (short dashes)
+  if (tx.isMalicious) return "2 6";
+  // Collisions: small dashes
+  if (tx.status === "collision") return "4 4";
+  // Normal transmissions: dashed
+  return "8 4";
 }
 
 /** Calculate position error in meters */
@@ -89,30 +95,92 @@ function positionError(ns: NodeVisualState): number {
 export function LeafletMap({
   center,
   zoom,
-  suggestions,
   simState,
+  mapKey = 0,
+  showGodMode = false,
 }: LeafletMapProps) {
-  const [showGodMode, setShowGodMode] = useState(false);
+  const [showLegend, setShowLegend] = useState(true);
   const transmissions = simState?.transmissions ?? [];
   const nodeStates = simState?.nodeStates ?? [];
 
   return (
     <>
-      {/* God mode toggle */}
-      <div className="absolute top-20 right-4 z-[1000]">
+      {/* Legend */}
+      {showLegend && (
+        <div className="absolute top-20 left-4 z-[1000] w-64 rounded-xl bg-white/90 p-4 shadow-lg backdrop-blur-sm">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-semibold text-[var(--foreground)]">Transmission Legend</span>
+            <button
+              onClick={() => setShowLegend(false)}
+              className="text-[var(--muted)] hover:text-[var(--foreground)] text-xs"
+            >
+              ✕
+            </button>
+          </div>
+          
+          <div className="space-y-2.5">
+            {/* Channel colors */}
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Channels</p>
+              <div className="grid grid-cols-4 gap-1">
+                {[0, 1, 2, 3, 4, 5, 6, 7].map((ch) => (
+                  <div key={ch} className="flex items-center gap-1">
+                    <div 
+                      className="w-6 h-0.5 rounded-full" 
+                      style={{ backgroundColor: txColorByChannel(ch) }}
+                    />
+                    <span className="text-[9px] text-[var(--muted)]">{ch}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Line styles */}
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Line Styles</p>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#22c55e" strokeWidth="2" strokeDasharray="8 4" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Normal</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#ef4444" strokeWidth="2" strokeDasharray="2 6" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Malicious</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#ef4444" strokeWidth="2" strokeDasharray="4 4" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Collision</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#f59e0b" strokeWidth="2" strokeDasharray="8 4" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Captured</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toggle legend button (when hidden) */}
+      {!showLegend && (
         <button
-          onClick={() => setShowGodMode(!showGodMode)}
-          className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
-            showGodMode
-              ? "bg-amber-500/90 text-white"
-              : "bg-white/80 text-[var(--muted)] hover:bg-white"
-          }`}
+          onClick={() => setShowLegend(true)}
+          className="absolute top-20 left-4 z-[1000] rounded-lg bg-white/80 px-3 py-1.5 text-[10px] font-medium text-[var(--muted)] shadow-sm backdrop-blur-sm transition-colors hover:bg-white"
         >
-          {showGodMode ? "👁 True Positions" : "📡 Estimated"}
+          Show Legend
         </button>
-      </div>
+      )}
 
       <MapContainer
+        key={`map-${mapKey}`}
         center={center}
         zoom={zoom}
         minZoom={13}
@@ -210,12 +278,12 @@ export function LeafletMap({
               center={[lat, lng]}
               radius={7}
               pathOptions={{
-                color: hasPosition ? color : "#9ca3af",
+                color,
                 weight,
-                opacity: hasPosition ? 0.9 : 0.4,
-                fillColor: isAnchor ? color : "transparent",
-                fillOpacity: isAnchor ? 0.3 : 0,
-                dashArray: hasPosition ? undefined : "3 3",
+                opacity: hasPosition ? 0.9 : 0.6,
+                fillColor: "transparent",
+                fillOpacity: 0,
+                dashArray: "1 5",
               }}
             >
               <Tooltip
@@ -265,31 +333,6 @@ export function LeafletMap({
               />
             );
           })}
-
-        {/* Suggested nodes */}
-        {suggestions.map((node) => (
-          <CircleMarker
-            key={`suggest-${node.id}`}
-            center={[node.lat, node.lng]}
-            radius={7}
-            pathOptions={{
-              color: "#d4956a",
-              weight: 1.5,
-              opacity: 0.5,
-              dashArray: "4 3",
-              fillColor: "#d4956a",
-              fillOpacity: 0.04,
-            }}
-          >
-            <Tooltip
-              direction="top"
-              offset={[0, -10]}
-              className="lifelink-tooltip"
-            >
-              {node.reason}
-            </Tooltip>
-          </CircleMarker>
-        ))}
       </MapContainer>
     </>
   );

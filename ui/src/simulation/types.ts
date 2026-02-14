@@ -75,9 +75,19 @@ export interface NodeVisualState {
   knownNodes: number;
   /** This node's own name (from its config) */
   label: string;
+  /** Node IDs this node currently trusts */
+  trustedPeers: number[];
   /** Names of remote nodes this node has discovered via gossip.
    *  Key = nodeId, Value = label learned from heartbeats. */
   discoveredLabels: Record<number, string>;
+  /** Messages received by this node */
+  receivedMessages: Array<{
+    id: string;
+    fromNodeId: number;
+    text: string;
+    timestamp: number;
+    hopCount: number;
+  }>;
 }
 
 /** An in-flight transmission for the UI */
@@ -90,6 +100,10 @@ export interface Transmission {
   /** Whether this on-air attempt was received or collided */
   status: "ok" | "collision" | "captured";
   createdTick: number;
+  /** Channel the transmission was on (0-7) */
+  channel: number;
+  /** Whether the sender is a malicious node */
+  isMalicious: boolean;
 }
 
 /** A log event for the UI */

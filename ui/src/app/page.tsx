@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { Header, type ViewMode } from "@/components/header";
 import { SensorField } from "@/components/sensor-field";
 import { SimControls } from "@/components/sim-controls";
 import { Messenger, type ChatMessage } from "@/components/messenger";
 import { Sensors } from "@/components/sensors";
-import { useSimulation } from "@/hooks/use-simulation";
+import { NodeManager } from "@/components/node-manager";
+import { TrustGraphConfig } from "@/components/trust-graph-config";
+import { useSimulation, type SimulationHook } from "@/hooks/use-simulation";
 import type { SensorNode } from "@/types/sensor";
 import {
-  SUGGESTED_NODES,
   MAP_CENTER,
   MAP_ZOOM,
 } from "@/config/nodes";
@@ -18,23 +19,31 @@ import {
 const INITIAL_NODES: SensorNode[] = [];
 
 export default function Home() {
-  const [view, setView] = useState<ViewMode>("sensors"); // Start on sensors to add nodes
+  const [view, setView] = useState<ViewMode>("nodes"); // Start on nodes tab
   const [nodes, setNodes] = useState<SensorNode[]>(INITIAL_NODES);
   const nextNodeId = useRef(1);
+  const [showMessages, setShowMessages] = useState(false);
+  const [messagesWide, setMessagesWide] = useState(false);
+  const [showGodMode, setShowGodMode] = useState(false);
+  const [mapKey, setMapKey] = useState(0);
 
-  const sim = useSimulation(nodes);
+  const sim: SimulationHook = useSimulation(nodes);
 
   /* ── Lifted message state — persists across tab switches ── */
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const msgCounter = useRef(0);
+  const msgCounterRef = useRef(0);
 
   /* ── Persist delivery / failure statuses back into messages ── */
+  /* ── Also add received messages from simulator ── */
   useEffect(() => {
     if (!sim.state) return;
-    const { deliveredTrackingIds, tick } = sim.state;
+    const { deliveredTrackingIds, tick, nodeStates } = sim.state;
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMessages((prev) => {
       let changed = false;
+
+      // Update statuses of sent messages
       const next = prev.map((msg) => {
         if (msg.status === "delivered" || msg.status === "failed") return msg;
 
@@ -51,14 +60,46 @@ export default function Home() {
 
         return msg;
       });
+
+      // Collect all received messages from all nodes
+      const receivedMessageIds = new Set(
+        next.filter((m) => m.direction === "received").map((m) => m.id)
+      );
+
+      for (const nodeState of nodeStates) {
+        for (const receivedMsg of nodeState.receivedMessages) {
+          // Avoid duplicates
+          if (!receivedMessageIds.has(receivedMsg.id)) {
+            changed = true;
+            receivedMessageIds.add(receivedMsg.id);
+            next.push({
+              id: receivedMsg.id,
+              fromNodeId: receivedMsg.fromNodeId,
+              toNodeId: nodeState.id, // This node received it
+              text: receivedMsg.text,
+              timestamp: receivedMsg.timestamp,
+              direction: "received" as const,
+              status: "delivered" as const,
+              hops: receivedMsg.hopCount,
+            });
+          }
+        }
+      }
+
       return changed ? next : prev;
     });
   }, [sim.state]);
 
+  /* ── Refresh handler for messages ── */
+  const handleRefreshMessages = useCallback(() => {
+    setMessages([]);
+    msgCounterRef.current = 0;
+  }, []);
+
   /* ── Send + auto-play so the message actually routes ── */
   const handleMessengerSend = useCallback(
-    (from: number, to: number, trackingId?: string) => {
-      sim.sendMessage(from, to, trackingId);
+    (from: number, to: number, text?: string, trackingId?: string) => {
+      sim.sendMessage(from, to, text, trackingId);
       if (!sim.running) {
         sim.play();
       }
@@ -84,6 +125,154 @@ export default function Home() {
     }]);
   }, []);
 
+  /* ── Node Management Handlers ── */
+  const handleAddNode = useCallback((node: SensorNode) => {
+    setNodes((prev) => [...prev, node]);
+    nextNodeId.current = Math.max(nextNodeId.current, node.id + 1);
+  }, []);
+
+  const handleDeleteNode = useCallback((nodeId: number) => {
+    setNodes((prev) => prev.filter((n) => n.id !== nodeId));
+  }, []);
+
+  const handleToggleMalicious = useCallback((nodeId: number, isMalicious: boolean) => {
+    setNodes((prev) => prev.map((n) => {
+      if (n.id === nodeId) {
+        return {
+          ...n,
+          label: isMalicious 
+            ? `[MAL] ${n.label?.replace("[MAL] ", "") ?? `Node ${n.id}`}`
+            : n.label?.replace("[MAL] ", "") ?? `Node ${n.id}`,
+        };
+      }
+      return n;
+    }));
+  }, []);
+
+  const handleConfigureAttack = useCallback((nodeId: number, strategy: string, intensity: number) => {
+    if (!sim.state) return;
+    const simulator = sim.simRef.current;
+    if (simulator) {
+      const node = simulator.getNode(nodeId);
+      if (node && typeof node.setStrategy === "function") {
+        node.setStrategy(strategy);
+        node.setIntensity(intensity);
+      }
+    }
+  }, [sim]);
+
+  const handleQuickSetup = useCallback((config: {
+    nodeCount: number;
+    maliciousCount: number;
+    maliciousTypes: { type: string; count: number }[];
+    density: number;
+  }) => {
+    // Clear existing nodes
+    setNodes([]);
+    nextNodeId.current = 1;
+
+    // Generate random positions in Stanford area
+    const newNodes: SensorNode[] = [];
+    const centerLat = 37.4275;
+    const centerLng = -122.1697;
+    const spread = 0.01; // ~1km spread
+
+    // Generate malicious nodes first
+    const maliciousNodes: Array<{ type: string; id: number }> = [];
+    let currentId = 1;
+
+    for (const { type, count } of config.maliciousTypes) {
+      for (let i = 0; i < count; i++) {
+        const id = currentId++;
+        const lat = centerLat + (Math.random() - 0.5) * spread;
+        const lng = centerLng + (Math.random() - 0.5) * spread;
+        newNodes.push({
+          id,
+          lat,
+          lng,
+          label: `[MAL] ${type.charAt(0).toUpperCase() + type.slice(1)} ${i + 1}`,
+          radius: 170,
+          isAnchor: false,
+        });
+        maliciousNodes.push({ type, id });
+      }
+    }
+
+    // Generate regular nodes
+    for (let i = 0; i < config.nodeCount - config.maliciousCount; i++) {
+      const lat = centerLat + (Math.random() - 0.5) * spread;
+      const lng = centerLng + (Math.random() - 0.5) * spread;
+      newNodes.push({
+        id: currentId++,
+        lat,
+        lng,
+        label: `Node ${i + 1}`,
+        radius: 170,
+        isAnchor: i < 3, // First 3 nodes are anchors
+      });
+    }
+
+    setNodes(newNodes);
+    nextNodeId.current = currentId;
+
+    // Wait for simulation to update, then configure
+    setTimeout(() => {
+      const simulator = sim.simRef.current;
+      if (!simulator) return;
+
+      // Configure malicious node strategies
+      for (const { type, id } of maliciousNodes) {
+        const node = simulator.getNode(id);
+        if (node && typeof node.setStrategy === "function") {
+          node.setStrategy(type);
+          node.setIntensity(0.5);
+        }
+      }
+
+      // Configure trust graph (exclude malicious nodes)
+      const regularNodeIds = newNodes
+        .filter((n) => !n.label?.includes("[MAL]"))
+        .map((n) => n.id);
+      
+      if (regularNodeIds.length > 0) {
+        simulator.configureTrustGraph(regularNodeIds, config.density);
+      }
+    }, 100);
+  }, [sim]);
+
+  const handleClearAll = useCallback(() => {
+    setNodes([]);
+    nextNodeId.current = 1;
+  }, []);
+
+  /* ── Trust Graph Configuration ── */
+  const handleConfigureTrust = useCallback((nodeIds: number[], density: number) => {
+    if (!sim.state) return;
+    // Access simulator internals to configure trust
+    const simulator = sim.simRef.current;
+    if (simulator) {
+      simulator.configureTrustGraph(nodeIds, density);
+      sim.refreshState();
+    }
+  }, [sim]);
+
+  const handleApplyTrustGraph = useCallback((trustMap: Record<number, number[]>) => {
+    if (!sim.state) return;
+    const simulator = sim.simRef.current;
+    if (simulator) {
+      simulator.setTrustGraphFromMap(trustMap);
+      sim.refreshState();
+    }
+  }, [sim]);
+
+  const trustMap = useMemo(() => {
+    const map: Record<number, number[]> = {};
+    for (const nodeState of sim.state?.nodeStates ?? []) {
+      map[nodeState.id] = nodeState.trustedPeers ?? [];
+    }
+    return map;
+  }, [sim.state]);
+
   /* ── Derived counts ── */
   const anchorCount = sim.state?.nodeStates.filter(
     (n) => n.posConfidence === 1,
@@ -102,11 +291,85 @@ export default function Home() {
       {view === "map" && (
         <>
           <SensorField
-            suggestions={SUGGESTED_NODES}
             center={MAP_CENTER}
             zoom={MAP_ZOOM}
             simState={sim.state}
+            mapKey={mapKey}
+            showGodMode={showGodMode}
           />
+
+          <div className="absolute top-16 right-4 z-[1000] grid w-[240px] grid-cols-2 gap-2">
+            <button
+              onClick={() => setShowMessages((prev) => !prev)}
+              className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
+                showMessages
+                  ? "bg-sky-500/90 text-white"
+                  : "bg-white/80 text-[var(--muted)] hover:bg-white"
+              }`}
+            >
+              {showMessages ? "💬 Hide Messages" : "💬 Show Messages"}
+            </button>
+            <button
+              onClick={() => setMessagesWide((prev) => !prev)}
+              disabled={!showMessages}
+              className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
+                showMessages
+                  ? messagesWide
+                    ? "bg-blue-500/90 text-white"
+                    : "bg-white/80 text-[var(--muted)] hover:bg-white"
+                  : "bg-white/40 text-[var(--muted)]/40 cursor-not-allowed"
+              }`}
+            >
+              {messagesWide ? "↔ Narrow" : "↔ Wide"}
+            </button>
+
+            <button
+              onClick={() => setMapKey((prev) => prev + 1)}
+              className="rounded-lg bg-white/80 px-3 py-1.5 text-[10px] font-medium text-[var(--muted)] shadow-sm backdrop-blur-sm transition-colors hover:bg-white"
+            >
+              🔄 Refresh Map
+            </button>
+            <button
+              onClick={() => setShowGodMode((prev) => !prev)}
+              className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
+                showGodMode
+                  ? "bg-amber-500/90 text-white"
+                  : "bg-white/80 text-[var(--muted)] hover:bg-white"
+              }`}
+            >
+              {showGodMode ? "👁 True Positions" : "📡 Estimated"}
+            </button>
+          </div>
+
+          <div
+            className={`absolute right-0 top-32 bottom-16 z-[900] flex max-h-[calc(100%-12rem)] flex-col items-end gap-3 pr-4 transition-transform duration-300 ${
+              showMessages ? "translate-x-0" : "translate-x-full"
+            } ${
+              messagesWide
+                ? "w-[980px]"
+                : "w-[780px]"
+            }`}
+          >
+            {showMessages && (
+              <div
+                className={`mt-auto flex h-[54vh] min-h-[360px] max-h-[700px] flex-col overflow-hidden rounded-xl border border-[var(--foreground)]/10 bg-[var(--surface)] shadow-2xl ${
+                  messagesWide ? "w-[980px]" : "w-[780px]"
+                }`}
+              >
+                <Messenger
+                  nodes={nodes}
+                  simState={sim.state}
+                  messages={messages}
+                  setMessages={setMessages}
+                  msgCounterRef={msgCounterRef}
+                  onSendMessage={handleMessengerSend}
+                  onRefresh={handleRefreshMessages}
+                  variant="panel"
+                  allowAnyGateway
+                />
+              </div>
+            )}
+          </div>
 
           <SimControls
             state={sim.state}
@@ -121,31 +384,45 @@ export default function Home() {
         </>
       )}
 
-      {/* ── Messages view ──────────────────────────────── */}
-      {view === "messages" && (
-        <Messenger
-          nodes={nodes}
-          simState={sim.state}
-          messages={messages}
-          setMessages={setMessages}
-          msgCounter={msgCounter}
-          onSendMessage={handleMessengerSend}
-        />
-      )}
-
       {/* ── Sensors view (BLE node configuration) ─────── */}
       {view === "sensors" && (
         <Sensors onNodeConfigured={handleNodeConfigured} />
       )}
 
+      {/* ── Nodes view (Node Management) ────────────── */}
+      {view === "nodes" && (
+        <NodeManager
+          nodes={nodes}
+          onAddNode={handleAddNode}
+          onDeleteNode={handleDeleteNode}
+          onToggleMalicious={handleToggleMalicious}
+          onConfigureAttack={handleConfigureAttack}
+          onQuickSetup={handleQuickSetup}
+          onClearAll={handleClearAll}
+          simState={sim.state}
+        />
+      )}
+
+      {/* ── Trust view (Trust Graph Configuration) ──── */}
+      {view === "trust" && (
+        <TrustGraphConfig
+          nodes={nodes}
+          onConfigure={handleConfigureTrust}
+          trustMap={trustMap}
+          onApplyConnections={handleApplyTrustGraph}
+        />
+      )}
+
       <footer className="absolute inset-x-0 bottom-0 z-[1000] flex items-center justify-between px-8 py-4 text-[11px] text-[var(--muted)]">
-        <span>LifeLink v0.1.0</span>
+        <span>LifeLink v0.2.0</span>
         <span>
           {view === "map"
             ? "Stanford Campus — Mesh Simulation"
-            : view === "messages"
-              ? "Stanford Campus — Mesh Messenger"
-              : "Stanford Campus — Node Setup"}
+            : view === "nodes"
+                ? "Node Management — Add/Delete Nodes"
+                : view === "trust"
+                  ? "Trust Configuration — Public Key Exchange"
+                  : "Stanford Campus — Node Setup"}
         </span>
       </footer>
     </main>

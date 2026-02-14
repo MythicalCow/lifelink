@@ -1,9 +1,13 @@
 /* ── MeshSimulator ────────────────────────────────────
  * Orchestrates ticks, models the radio channel, and
  * collects visual state for the UI.
+ * Now uses Environment for RF physics and supports
+ * MaliciousNode variants.
  * ───────────────────────────────────────────────────── */
 
 import { MeshNode } from "./mesh-node";
+import { MaliciousNode } from "./malicious-node";
+import { Environment } from "./environment";
 import {
   PacketType,
   type MeshPacket,
@@ -33,11 +37,15 @@ interface ReceptionCandidate {
   receiver: MeshNode;
   packet: MeshPacket;
   rssi: number;
+  channel: number;
 }
 
 export class MeshSimulator {
   nodes: Map<number, MeshNode> = new Map();
   tick = 0;
+  
+  /** RF environment simulator */
+  environment: Environment;
 
   private transmissions: Transmission[] = [];
   private events: SimEvent[] = [];
@@ -52,19 +60,39 @@ export class MeshSimulator {
   /* ── Init ──────────────────────────────────────────── */
 
   constructor(sensorNodes: SensorNode[]) {
+    this.environment = new Environment();
+    
     for (const sn of sensorNodes) {
       // Use explicit isAnchor flag if provided, otherwise default to false
       const isAnchor = sn.isAnchor ?? false;
-      this.nodes.set(
-        sn.id,
-        new MeshNode(
+      
+      // Check if this should be a malicious node (detect by label prefix)
+      const isMalicious = sn.label?.startsWith("[MAL]") ?? false;
+      
+      if (isMalicious) {
+        this.nodes.set(
           sn.id,
-          sn.lat,
-          sn.lng,
-          sn.label ?? `Node ${sn.id}`,
-          isAnchor,
-        ),
-      );
+          new MaliciousNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+            "jammer", // default strategy
+          ),
+        );
+      } else {
+        this.nodes.set(
+          sn.id,
+          new MeshNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+          ),
+        );
+      }
     }
   }
 
@@ -73,6 +101,9 @@ export class MeshSimulator {
   /** Advance simulation by one tick. Returns full state snapshot. */
   step(): SimState {
     this.tick++;
+
+    // Start new environment tick
+    this.environment.startTick();
 
     // Reset visual states
     for (const node of this.nodes.values()) {
@@ -84,9 +115,9 @@ export class MeshSimulator {
     // Here we simulate by providing true distances + noise
     this.performFtmRangingPhase();
 
-    // 1. Each node runs its internal tick (beacon timers, expiry, trilateration)
+    // 1. Each node runs its loop (beacon timers, expiry, trilateration, attacks)
     for (const node of this.nodes.values()) {
-      node.tick(this.tick);
+      node.loop(this.tick);
     }
 
     // 2. Process TX queues — one packet per node per tick (half-duplex)
@@ -126,7 +157,7 @@ export class MeshSimulator {
         heardByAnyReceiver = true;
 
         const list = receptionMap.get(receiver.id) ?? [];
-        list.push({ sender, receiver, packet, rssi });
+        list.push({ sender, receiver, packet, rssi, channel: sender.loraChannel });
         receptionMap.set(receiver.id, list);
       }
 
@@ -218,19 +249,38 @@ export class MeshSimulator {
 
   reset(sensorNodes: SensorNode[]): void {
     this.nodes.clear();
+    this.environment = new Environment(); // Reset environment
+    
     for (const sn of sensorNodes) {
       const isAnchor = sn.isAnchor ?? false;
-      this.nodes.set(
-        sn.id,
-        new MeshNode(
+      const isMalicious = sn.label?.startsWith("[MAL]") ?? false;
+      
+      if (isMalicious) {
+        this.nodes.set(
           sn.id,
-          sn.lat,
-          sn.lng,
-          sn.label ?? `Node ${sn.id}`,
-          isAnchor,
-        ),
-      );
+          new MaliciousNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+            "jammer",
+          ),
+        );
+      } else {
+        this.nodes.set(
+          sn.id,
+          new MeshNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+          ),
+        );
+      }
     }
+    
     this.tick = 0;
     this.transmissions = [];
     this.events = [];
@@ -271,7 +321,9 @@ export class MeshSimulator {
         neighborCount: node.directNeighborCount,
         knownNodes: node.knownNodeCount,
         label: node.label,
+        trustedPeers: [...node.storage.trustedPeers.keys()],
         discoveredLabels,
+        receivedMessages: [...node.receivedMessages],
       });
     }
 
@@ -372,7 +424,7 @@ export class MeshSimulator {
     candidate: ReceptionCandidate,
     status: Transmission["status"],
   ): void {
-    const { sender, receiver, packet, rssi } = candidate;
+    const { sender, receiver, packet, rssi, channel } = candidate;
     receiver.state = "rx";
 
     this.transmissions.push({
@@ -383,7 +435,12 @@ export class MeshSimulator {
       packetType: packet.type,
       status,
       createdTick: this.tick,
+      channel,
+      isMalicious: sender instanceof MaliciousNode,
     });
+
+    // Record transmission result on sender node
+    sender.recordTransmissionResult(packet.id, status);
 
     const response = receiver.receive(packet, rssi, this.tick);
     if (!response) return;
@@ -414,7 +471,7 @@ export class MeshSimulator {
   }
 
   private dropCandidateByCollision(candidate: ReceptionCandidate): void {
-    const { sender, receiver, packet } = candidate;
+    const { sender, receiver, packet, channel } = candidate;
 
     this.transmissions.push({
       fromLat: sender.trueLat,
@@ -424,7 +481,12 @@ export class MeshSimulator {
       packetType: packet.type,
       status: "collision",
       createdTick: this.tick,
+      channel,
+      isMalicious: sender instanceof MaliciousNode,
     });
+
+    // Record collision status on sender node
+    sender.recordTransmissionResult(packet.id, "collision");
 
     if (packet.type === PacketType.DATA || packet.type === PacketType.ACK) {
       this.totalDropped++;
@@ -433,5 +495,131 @@ export class MeshSimulator {
         "warn",
       );
     }
+  }
+
+  /* ── New API: Trust Management ──────────────────────── */
+
+  /**
+   * Establish trust between two nodes (bidirectional).
+   */
+  establishTrust(nodeId1: number, nodeId2: number): void {
+    const node1 = this.nodes.get(nodeId1);
+    const node2 = this.nodes.get(nodeId2);
+    
+    if (!node1 || !node2) return;
+    
+    // Exchange public keys
+    node1.trustPeer(nodeId2, node2.getPublicKey());
+    node2.trustPeer(nodeId1, node1.getPublicKey());
+    
+    this.log(
+      `🤝 Trust established between ${node1.label} and ${node2.label}`,
+      "info",
+    );
+  }
+
+  /**
+   * Configure trust graph with specified density.
+   * @param nodeIds - Nodes to include in trust graph
+   * @param density - 0-1, percentage of possible connections to create
+   */
+  configureTrustGraph(nodeIds: number[], density: number): void {
+    const d = Math.max(0, Math.min(1, density));
+
+    for (const nodeId of nodeIds) {
+      const node = this.nodes.get(nodeId);
+      if (node) node.clearTrustedPeers();
+    }
+    
+    // Create connections based on density
+    for (let i = 0; i < nodeIds.length; i++) {
+      for (let j = i + 1; j < nodeIds.length; j++) {
+        if (Math.random() < d) {
+          this.establishTrust(nodeIds[i], nodeIds[j]);
+        }
+      }
+    }
+    
+    const possibleConnections = (nodeIds.length * (nodeIds.length - 1)) / 2;
+    const actualConnections = Math.floor(possibleConnections * d);
+    
+    this.log(
+      `🌐 Trust graph configured: ${actualConnections} connections at ${(d * 100).toFixed(0)}% density`,
+      "info",
+    );
+  }
+
+  /**
+   * Configure trust graph explicitly with a map of connections.
+   */
+  setTrustGraphFromMap(trustMap: Record<number, number[]>): void {
+    const nodeIds = Object.keys(trustMap).map((id) => Number(id));
+    const existingNodeIds = nodeIds.filter((id) => this.nodes.has(id));
+
+    for (const nodeId of existingNodeIds) {
+      const node = this.nodes.get(nodeId);
+      if (node) node.clearTrustedPeers();
+    }
+
+    let connectionCount = 0;
+    const seenPairs = new Set<string>();
+
+    for (const nodeId of existingNodeIds) {
+      const peers = trustMap[nodeId] ?? [];
+      for (const peerId of peers) {
+        if (!this.nodes.has(peerId)) continue;
+        const a = Math.min(nodeId, peerId);
+        const b = Math.max(nodeId, peerId);
+        const key = `${a}-${b}`;
+        if (a === b || seenPairs.has(key)) continue;
+        seenPairs.add(key);
+        this.establishTrust(a, b);
+        connectionCount++;
+      }
+    }
+
+    this.log(
+      `🔗 Trust graph updated: ${connectionCount} explicit connections`,
+      "info",
+    );
+  }
+
+  /**
+   * Get node instance (for direct access).
+   */
+  getNode(nodeId: number): MeshNode | undefined {
+    return this.nodes.get(nodeId);
+  }
+
+  /**
+   * Get environment (for UI access to spectrum, jammers, etc.).
+   */
+  getEnvironment(): Environment {
+    return this.environment;
+  }
+
+  /**
+   * Add a jammer to the environment.
+   */
+  addJammer(
+    lat: number,
+    lng: number,
+    radiusM: number,
+    powerDbm: number,
+    channels: number[],
+  ): void {
+    this.environment.addJammer(lat, lng, radiusM, powerDbm, channels);
+    this.log(
+      `🔇 Jammer deployed at (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+      "warn",
+    );
+  }
+
+  /**
+   * Clear all jammers.
+   */
+  clearJammers(): void {
+    this.environment.clearJammers();
+    this.log("Jammers cleared", "info");
   }
 }
