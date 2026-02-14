@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+/* ── Design tokens ─────────────────────────────────── */
+
+:root {
+  --background: #f7f5f0;
+  --surface: #f1eee7;
+  --foreground: #3a3527;
+  --muted: #a09882;
+  --accent: #6b9e8a;
+  --accent-soft: #6b9e8a26;
+  --suggest: #d4956a;
+  --suggest-soft: #d4956a1a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+
+  --animate-pulse-gentle: pulse-gentle 5s ease-in-out infinite;
+  --animate-perimeter-breathe: perimeter-breathe 7s ease-in-out infinite;
+}
+
+/* ── Keyframes ─────────────────────────────────────── */
+
+@keyframes pulse-gentle {
+  0%,
+  100% {
+    opacity: 0.9;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes perimeter-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    scale: 1;
+  }
+  50% {
+    opacity: 0.55;
+    scale: 1.035;
+  }
+}
+
+/* ── Base ──────────────────────────────────────────── */
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(107, 158, 138, 0.18);
+}
+
+/* ── Leaflet overrides — keep the light minimal theme ─ */
+
+.leaflet-container {
+  background: var(--surface) !important;
+  font-family: var(--font-geist-sans), system-ui, sans-serif !important;
+}
+
+/* Remove default Leaflet chrome */
+.leaflet-control-zoom {
+  display: none !important;
+}
+
+/* Custom tooltip styling */
+.lifelink-tooltip {
+  background: var(--foreground) !important;
+  color: var(--background) !important;
+  border: none !important;
+  border-radius: 6px !important;
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.01em !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
+}
+
+.lifelink-tooltip::before {
+  border-top-color: var(--foreground) !important;
+}
+
+/* Wash out tiles so sensor overlays pop crisply */
+.leaflet-tile-pane {
+  opacity: 0.3;
+}
