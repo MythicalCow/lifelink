@@ -17,28 +17,9 @@ import {
   type NodeVisualState,
   type SimState,
 } from "./types";
-import {
-  RADIO_RANGE_M,
-  FTM_RANGE_M,
-  CAPTURE_THRESHOLD_DB,
-  TX_VISUAL_DURATION,
-  MAX_LOG_EVENTS,
-} from "./config";
+import { FTM_RANGE_M, TX_VISUAL_DURATION, MAX_LOG_EVENTS } from "./config";
 import { haversine } from "./utils";
 import type { SensorNode } from "@/types/sensor";
-
-interface AirPacket {
-  sender: MeshNode;
-  packet: MeshPacket;
-}
-
-interface ReceptionCandidate {
-  sender: MeshNode;
-  receiver: MeshNode;
-  packet: MeshPacket;
-  rssi: number;
-  channel: number;
-}
 
 export class MeshSimulator {
   nodes: Map<number, MeshNode> = new Map();
@@ -121,94 +102,149 @@ export class MeshSimulator {
     }
 
     // 2. Process TX queues — one packet per node per tick (half-duplex)
-    const packetsInAir: AirPacket[] = [];
+    const senderByPacketId = new Map<string, MeshNode>();
+    const packetById = new Map<string, MeshPacket>();
+    const heardByPacketId = new Map<string, boolean>();
+
     for (const node of this.nodes.values()) {
       const pkt = node.txQueue.shift();
-      if (pkt) {
-        node.state = "tx";
-        packetsInAir.push({ sender: node, packet: pkt });
-        this.totalSent++;
-      }
-    }
+      if (!pkt) continue;
 
-    // 3. Build per-receiver contention map for this tick.
-    // If multiple packets arrive at a receiver in the same tick, we model
-    // LoRa channel contention + capture effect.
-    const receptionMap = new Map<number, ReceptionCandidate[]>();
-    for (const air of packetsInAir) {
-      const { sender, packet } = air;
-      let heardByAnyReceiver = false;
+      node.state = "tx";
+      this.totalSent++;
 
-      for (const receiver of this.nodes.values()) {
-        if (receiver.id === sender.id) continue;
-        if (receiver.state === "tx") continue; // cannot RX while TX
+      const accepted = this.environment.transmit(
+        pkt,
+        node.id,
+        node.trueLat,
+        node.trueLng,
+        node.loraChannel,
+      );
 
-        // Use TRUE positions for physics (radio propagation)
-        const dist = haversine(
-          sender.trueLat,
-          sender.trueLng,
-          receiver.trueLat,
-          receiver.trueLng,
-        );
-        if (dist > RADIO_RANGE_M) continue;
-
-        // RSSI model: simple log-distance path loss
-        const rssi = -40 - 20 * Math.log10(Math.max(dist, 1));
-        heardByAnyReceiver = true;
-
-        const list = receptionMap.get(receiver.id) ?? [];
-        list.push({ sender, receiver, packet, rssi, channel: sender.loraChannel });
-        receptionMap.set(receiver.id, list);
-      }
-
-      this.logPacketSend(sender, packet);
-
-      // No one in range -> drop (for data/ack payload traffic)
-      if (
-        !heardByAnyReceiver &&
-        (packet.type === PacketType.DATA || packet.type === PacketType.ACK)
-      ) {
-        this.totalDropped++;
-        this.log(
-          `✗ Packet from ${sender.label} lost (no receivers in range)`,
-          "warn",
-        );
-      }
-    }
-
-    // 4. Resolve each receiver's on-air contention.
-    for (const candidates of receptionMap.values()) {
-      if (candidates.length === 1) {
-        this.deliverCandidate(candidates[0], "ok");
-        continue;
-      }
-
-      // Multiple same-tick arrivals at one receiver => contention.
-      // Capture effect: strongest packet may still decode if it exceeds
-      // the second strongest by CAPTURE_THRESHOLD_DB.
-      const sorted = [...candidates].sort((a, b) => b.rssi - a.rssi);
-      const strongest = sorted[0];
-      const second = sorted[1];
-      const margin = strongest.rssi - second.rssi;
-
-      this.totalCollisions++;
-
-      if (margin >= CAPTURE_THRESHOLD_DB) {
-        this.log(
-          `⚡ Capture at ${strongest.receiver.label}: ${sorted.length} simultaneous packets, strongest won by ${margin.toFixed(1)} dB`,
-          "warn",
-        );
-        this.deliverCandidate(strongest, "captured");
-        for (let i = 1; i < sorted.length; i++) {
-          this.dropCandidateByCollision(sorted[i]);
-        }
+      if (accepted) {
+        this.logPacketSend(node, pkt);
+        senderByPacketId.set(pkt.id, node);
+        packetById.set(pkt.id, pkt);
+        heardByPacketId.set(pkt.id, false);
       } else {
-        this.log(
-          `✗ Collision at ${strongest.receiver.label}: ${sorted.length} simultaneous packets`,
-          "warn",
-        );
-        for (const candidate of sorted) {
-          this.dropCandidateByCollision(candidate);
+        if (pkt.type === PacketType.DATA || pkt.type === PacketType.ACK) {
+          this.totalDropped++;
+          this.log(
+            `✗ Packet from ${node.label} jammed at source`,
+            "warn",
+          );
+        }
+        node.recordTransmissionResult(pkt.id, "jammed");
+      }
+    }
+
+    // 3. Continuous listening: every node attempts to receive each tick.
+    for (const receiver of this.nodes.values()) {
+      if (receiver.state === "tx") continue; // cannot RX while TX
+
+      const results = this.environment.receive(
+        receiver.id,
+        receiver.trueLat,
+        receiver.trueLng,
+        receiver.loraChannel,
+      );
+
+      if (results.length === 0) continue;
+
+      const hasDecodable = results.some(
+        (r) => r.status === "ok" || r.status === "captured",
+      );
+      if (hasDecodable) receiver.state = "rx";
+
+      for (const result of results) {
+        const sender = senderByPacketId.get(result.packet.id);
+        if (!sender) continue;
+
+        heardByPacketId.set(result.packet.id, true);
+
+        this.transmissions.push({
+          fromLat: sender.trueLat,
+          fromLng: sender.trueLng,
+          toLat: receiver.trueLat,
+          toLng: receiver.trueLng,
+          packetType: result.packet.type,
+          status: result.status,
+          createdTick: this.tick,
+          channel: result.channel,
+          isMalicious: sender instanceof MaliciousNode,
+          radioType: result.packet.radioType,
+        });
+
+        sender.recordTransmissionResult(result.packet.id, result.status);
+
+        if (result.status === "collision") {
+          this.totalCollisions++;
+          if (
+            result.packet.type === PacketType.DATA ||
+            result.packet.type === PacketType.ACK
+          ) {
+            this.totalDropped++;
+            this.log(
+              `✗ Collision drop: ${sender.label} → ${receiver.label}`,
+              "warn",
+            );
+          }
+          continue;
+        }
+
+        if (result.status === "jammed") {
+          if (
+            result.packet.type === PacketType.DATA ||
+            result.packet.type === PacketType.ACK
+          ) {
+            this.totalDropped++;
+            this.log(
+              `✗ Jammed: ${sender.label} → ${receiver.label}`,
+              "warn",
+            );
+          }
+          continue;
+        }
+
+        const response = receiver.receive(result.packet, result.rssi, this.tick);
+        if (!response) continue;
+
+        receiver.txQueue.push(response);
+
+        if (response.type === PacketType.ACK) {
+          this.totalDelivered++;
+          this.hopAccumulator += result.packet.hopCount;
+          this.deliveryCount++;
+
+          const trkMatch = result.packet.payload.match(/\[trk:([^\]]+)\]/);
+          if (trkMatch) {
+            this.deliveredTrackingIds.add(trkMatch[1]);
+          }
+
+          this.log(
+            `✓ Delivered to ${receiver.label} from Node ${result.packet.sourceId} (${result.packet.hopCount} hops)`,
+            "success",
+          );
+        } else if (response.type === PacketType.DATA) {
+          this.log(
+            `↳ ${receiver.label} forwarding to next hop (hop ${response.hopCount})`,
+            "info",
+          );
+        }
+      }
+    }
+
+    // 4. Any accepted packet with no listeners becomes a drop.
+    for (const [packetId, packet] of packetById.entries()) {
+      if (heardByPacketId.get(packetId)) continue;
+      if (packet.type === PacketType.DATA || packet.type === PacketType.ACK) {
+        const sender = senderByPacketId.get(packetId);
+        if (sender) {
+          this.totalDropped++;
+          this.log(
+            `✗ Packet from ${sender.label} lost (no receivers in range)`,
+            "warn",
+          );
         }
       }
     }
@@ -417,83 +453,6 @@ export class MeshSimulator {
 
     if (packet.type === PacketType.ACK) {
       this.log(`↩ ${sender.label} sent ACK to Node ${packet.destId}`, "info");
-    }
-  }
-
-  private deliverCandidate(
-    candidate: ReceptionCandidate,
-    status: Transmission["status"],
-  ): void {
-    const { sender, receiver, packet, rssi, channel } = candidate;
-    receiver.state = "rx";
-
-    this.transmissions.push({
-      fromLat: sender.trueLat,
-      fromLng: sender.trueLng,
-      toLat: receiver.trueLat,
-      toLng: receiver.trueLng,
-      packetType: packet.type,
-      status,
-      createdTick: this.tick,
-      channel,
-      isMalicious: sender instanceof MaliciousNode,
-    });
-
-    // Record transmission result on sender node
-    sender.recordTransmissionResult(packet.id, status);
-
-    const response = receiver.receive(packet, rssi, this.tick);
-    if (!response) return;
-
-    receiver.txQueue.push(response);
-
-    if (response.type === PacketType.ACK) {
-      this.totalDelivered++;
-      this.hopAccumulator += packet.hopCount;
-      this.deliveryCount++;
-
-      // Extract tracking ID from payload for delivery confirmation
-      const trkMatch = packet.payload.match(/\[trk:([^\]]+)\]/);
-      if (trkMatch) {
-        this.deliveredTrackingIds.add(trkMatch[1]);
-      }
-
-      this.log(
-        `✓ Delivered to ${receiver.label} from Node ${packet.sourceId} (${packet.hopCount} hops)`,
-        "success",
-      );
-    } else if (response.type === PacketType.DATA) {
-      this.log(
-        `↳ ${receiver.label} forwarding to next hop (hop ${response.hopCount})`,
-        "info",
-      );
-    }
-  }
-
-  private dropCandidateByCollision(candidate: ReceptionCandidate): void {
-    const { sender, receiver, packet, channel } = candidate;
-
-    this.transmissions.push({
-      fromLat: sender.trueLat,
-      fromLng: sender.trueLng,
-      toLat: receiver.trueLat,
-      toLng: receiver.trueLng,
-      packetType: packet.type,
-      status: "collision",
-      createdTick: this.tick,
-      channel,
-      isMalicious: sender instanceof MaliciousNode,
-    });
-
-    // Record collision status on sender node
-    sender.recordTransmissionResult(packet.id, "collision");
-
-    if (packet.type === PacketType.DATA || packet.type === PacketType.ACK) {
-      this.totalDropped++;
-      this.log(
-        `✗ Collision drop: ${sender.label} → ${receiver.label}`,
-        "warn",
-      );
     }
   }
 

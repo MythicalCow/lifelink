@@ -40,6 +40,8 @@ export interface MeshPacket {
   originLng: number;
   /** Gossip payload (heartbeat only) */
   gossipEntries: GossipEntry[];
+  /** Radio type used for transmission (BLE for short range, LoRa for long range) */
+  radioType: "BLE" | "LoRa";
 }
 
 /** One row in a node's neighbor/routing table */
@@ -98,12 +100,14 @@ export interface Transmission {
   toLng: number;
   packetType: PacketType;
   /** Whether this on-air attempt was received or collided */
-  status: "ok" | "collision" | "captured";
+  status: "ok" | "collision" | "captured" | "jammed";
   createdTick: number;
   /** Channel the transmission was on (0-7) */
   channel: number;
   /** Whether the sender is a malicious node */
   isMalicious: boolean;
+  /** Radio type used for transmission (BLE for short range, LoRa for long range) */
+  radioType: "BLE" | "LoRa";
 }
 
 /** A log event for the UI */

@@ -50,31 +50,50 @@ function txColorByChannel(channel: number): string {
 
 /** Transmission line color */
 function txColor(tx: Transmission): string {
-  // Collisions and captures get special colors
-  if (tx.status === "collision") return "#ef4444";
-  if (tx.status === "captured") return "#f59e0b";
+  // Special statuses first
+  if (tx.status === "collision") return "#dc2626"; // darker red
+  if (tx.status === "captured") return "#f97316"; // orange
+  if (tx.status === "jammed") return "#475569"; // slate
   
-  // Normal transmissions use channel colors
-  return txColorByChannel(tx.channel);
+  // BLE vs LoRa coloring
+  if (tx.radioType === "BLE") {
+    return "#0ea5e9"; // bright cyan/blue
+  } else {
+    // LoRa uses red shades, varying by intensity
+    // Heartbeats are darker red, Data packets are brighter red
+    if (tx.packetType === PacketType.HEARTBEAT) {
+      return "#dc2626"; // medium-dark red
+    } else if (tx.packetType === PacketType.ACK) {
+      return "#f87171"; // lighter red
+    } else {
+      return "#ef4444"; // bright red
+    }
+  }
 }
 
 function txOpacity(tx: Transmission): number {
-  if (tx.status === "collision") return 0.72;
+  if (tx.status === "collision") return 0.75;
   if (tx.status === "captured") return 0.8;
-  return tx.packetType === PacketType.HEARTBEAT ? 0.15 : 0.6;
+  if (tx.status === "jammed") return 0.65;
+  // Much higher opacity for heartbeats so they're visible
+  if (tx.packetType === PacketType.HEARTBEAT) return 0.45;
+  return 0.7;
 }
 
 function txWeight(tx: Transmission): number {
   if (tx.status === "collision") return 2.6;
   if (tx.status === "captured") return 2.8;
-  return tx.packetType === PacketType.HEARTBEAT ? 1 : 2.5;
+  if (tx.status === "jammed") return 2.4;
+  return tx.packetType === PacketType.HEARTBEAT ? 1.5 : 2.5;
 }
 
 function txDashArray(tx: Transmission): string | undefined {
   // Malicious transmissions: dotted (short dashes)
   if (tx.isMalicious) return "2 6";
-  // Collisions: small dashes
-  if (tx.status === "collision") return "4 4";
+  // Status failures: all dotted
+  if (tx.status === "collision") return "2 4";
+  if (tx.status === "captured") return "2 4";
+  if (tx.status === "jammed") return "2 4";
   // Normal transmissions: dashed
   return "8 4";
 }
@@ -107,7 +126,7 @@ export function LeafletMap({
     <>
       {/* Legend */}
       {showLegend && (
-        <div className="absolute top-20 left-4 z-[1000] w-64 rounded-xl bg-white/90 p-4 shadow-lg backdrop-blur-sm">
+        <div className="absolute top-20 left-4 z-[1000] w-72 rounded-xl bg-white/90 p-4 shadow-lg backdrop-blur-sm">
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs font-semibold text-[var(--foreground)]">Transmission Legend</span>
             <button
@@ -118,50 +137,64 @@ export function LeafletMap({
             </button>
           </div>
           
-          <div className="space-y-2.5">
-            {/* Channel colors */}
+          <div className="space-y-3">
+            {/* Radio Types */}
             <div className="space-y-1">
-              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Channels</p>
-              <div className="grid grid-cols-4 gap-1">
-                {[0, 1, 2, 3, 4, 5, 6, 7].map((ch) => (
-                  <div key={ch} className="flex items-center gap-1">
-                    <div 
-                      className="w-6 h-0.5 rounded-full" 
-                      style={{ backgroundColor: txColorByChannel(ch) }}
-                    />
-                    <span className="text-[9px] text-[var(--muted)]">{ch}</span>
-                  </div>
-                ))}
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Radio Types</p>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div 
+                    className="w-6 h-1 rounded-full" 
+                    style={{ backgroundColor: "#0ea5e9", opacity: 0.7 }}
+                  />
+                  <span className="text-[10px] text-[var(--foreground)]">BLE (short range)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div 
+                    className="w-6 h-1 rounded-full" 
+                    style={{ backgroundColor: "#ef4444", opacity: 0.7 }}
+                  />
+                  <span className="text-[10px] text-[var(--foreground)]">LoRa (long range)</span>
+                </div>
               </div>
             </div>
 
-            {/* Line styles */}
+            {/* Packet Types */}
             <div className="space-y-1">
-              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Line Styles</p>
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Packet Types</p>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="text-[8px] font-bold text-[var(--muted)]">━━━</div>
+                  <span className="text-[10px] text-[var(--foreground)]">Data/ACK</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="text-[8px] font-light text-[var(--muted)]">━━━</div>
+                  <span className="text-[10px] text-[var(--foreground)]">Heartbeat</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Status */}
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Status</p>
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <svg width="32" height="8" className="shrink-0">
-                    <line x1="0" y1="4" x2="32" y2="4" stroke="#22c55e" strokeWidth="2" strokeDasharray="8 4" />
-                  </svg>
-                  <span className="text-[10px] text-[var(--foreground)]">Normal</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <svg width="32" height="8" className="shrink-0">
-                    <line x1="0" y1="4" x2="32" y2="4" stroke="#ef4444" strokeWidth="2" strokeDasharray="2 6" />
-                  </svg>
-                  <span className="text-[10px] text-[var(--foreground)]">Malicious</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <svg width="32" height="8" className="shrink-0">
-                    <line x1="0" y1="4" x2="32" y2="4" stroke="#ef4444" strokeWidth="2" strokeDasharray="4 4" />
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#dc2626" strokeWidth="1.5" strokeDasharray="2 4" opacity="0.75" />
                   </svg>
                   <span className="text-[10px] text-[var(--foreground)]">Collision</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <svg width="32" height="8" className="shrink-0">
-                    <line x1="0" y1="4" x2="32" y2="4" stroke="#f59e0b" strokeWidth="2" strokeDasharray="8 4" />
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#f97316" strokeWidth="1.5" strokeDasharray="2 4" opacity="0.8" />
                   </svg>
                   <span className="text-[10px] text-[var(--foreground)]">Captured</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#475569" strokeWidth="1.5" strokeDasharray="2 4" opacity="0.65" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Jammed</span>
                 </div>
               </div>
             </div>

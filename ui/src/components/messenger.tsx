@@ -588,7 +588,7 @@ export function Messenger({
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">Min tick</span>
+                  <span className="text-[var(--muted)]">Min wait</span>
                   <input
                     type="number"
                     min={0}
@@ -599,7 +599,7 @@ export function Messenger({
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">Max tick</span>
+                  <span className="text-[var(--muted)]">Max wait</span>
                   <input
                     type="number"
                     min={quickMinOffset}

@@ -14,6 +14,7 @@ import {
 import {
   BEACON_INTERVAL,
   BEACON_JITTER,
+  BLE_RANGE_M,
   MAX_GOSSIP_ENTRIES,
   MAX_TTL,
   NEIGHBOR_EXPIRY,
@@ -103,7 +104,7 @@ export class MeshNode {
     toNodeId: number;
     text: string;
     timestamp: number;
-    status: "sent" | "ok" | "collision" | "captured";
+    status: "sent" | "ok" | "collision" | "captured" | "jammed";
     hopCount: number;
   }> = [];
 
@@ -329,6 +330,8 @@ export class MeshNode {
       originLat: this.estLat,
       originLng: this.estLng,
       gossipEntries: entries,
+      // Heartbeats use LoRa by default (broadcast to everyone)
+      radioType: "LoRa",
     };
   }
 
@@ -449,6 +452,8 @@ export class MeshNode {
         originLat: this.estLat,
         originLng: this.estLng,
         gossipEntries: [],
+        // ACKs use the same radio that the incoming packet came on
+        radioType: packet.radioType,
       };
     }
 
@@ -525,6 +530,39 @@ export class MeshNode {
     return null; // no knowledge of destination
   }
 
+  /**
+   * BLE/LoRa optimization algorithm:
+   * Determines which radio to use for a transmission based on distance to target.
+   * 
+   * - If destination is a direct neighbor within BLE range (~100m): use BLE
+   * - Otherwise: use LoRa for longer range
+   * 
+   * BLE advantages: Reliable short range, less power, doesn't trigger interference
+   * LoRa advantages: Long range, penetrates obstacles, but noisier
+   */
+  private determineRadioType(targetNodeId: number): "BLE" | "LoRa" {
+    const neighbor = this.neighborTable.get(targetNodeId);
+    
+    // If no position info, default to LoRa
+    if (!neighbor) return "LoRa";
+    
+    // Calculate distance to this neighbor
+    const distance = haversine(
+      this.estLat,
+      this.estLng,
+      neighbor.lat,
+      neighbor.lng,
+    );
+    
+    // If within BLE range AND it's a direct neighbor, use BLE to reduce LoRa noise
+    if (distance <= BLE_RANGE_M && neighbor.hopsAway === 1) {
+      return "BLE";
+    }
+    
+    // For longer distances or multi-hop, use LoRa
+    return "LoRa";
+  }
+
   /* ── Public helpers for UI ─────────────────────────── */
 
   get directNeighborCount(): number {
@@ -541,18 +579,25 @@ export class MeshNode {
     const packetId = `${this.id}-${this.packetCounter++}`;
     const cleanPayload = payload.replace(/\[trk:[^\]]+\]/, '');
     
+    // Determine which radio to use based on distance to next hop
+    const nextHop = this.getNextHop(destId) ?? BROADCAST;
+    const radioType = nextHop !== BROADCAST 
+      ? this.determineRadioType(nextHop)
+      : "LoRa"; // Broadcast fallback uses LoRa
+    
     this.txQueue.push({
       id: packetId,
       type: PacketType.DATA,
       sourceId: this.id,
       destId,
-      nextHop: this.getNextHop(destId) ?? BROADCAST,
+      nextHop,
       ttl: MAX_TTL,
       hopCount: 0,
       payload,
       originLat: this.estLat,
       originLng: this.estLng,
       gossipEntries: [],
+      radioType,
     });
 
     // Track sent message
@@ -569,7 +614,10 @@ export class MeshNode {
   /**
    * Update the status of a sent message (called by simulator when transmission completes).
    */
-  recordTransmissionResult(packetId: string, status: "ok" | "collision" | "captured"): void {
+  recordTransmissionResult(
+    packetId: string,
+    status: "ok" | "collision" | "captured" | "jammed",
+  ): void {
     const msg = this.sentMessages.find((m) => m.id === packetId);
     if (msg) {
       msg.status = status;
