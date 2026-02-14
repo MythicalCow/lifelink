@@ -11,6 +11,8 @@ export interface SensorNode {
   label?: string;
   /** Whether this node is currently active */
   active?: boolean;
+  /** Whether this node is a GPS anchor (known position) */
+  isAnchor?: boolean;
 }
 
 export interface SuggestedNode {
