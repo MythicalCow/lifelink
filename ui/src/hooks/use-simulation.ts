@@ -48,9 +48,9 @@ export function useSimulation(sensorNodes: SensorNode[]) {
   }, []);
 
   const sendMessage = useCallback(
-    (fromId: number, toId: number) => {
+    (fromId: number, toId: number, trackingId?: string) => {
       if (!simRef.current) return;
-      simRef.current.sendMessage(fromId, toId);
+      simRef.current.sendMessage(fromId, toId, "hello", trackingId);
       // Queue only — lets users enqueue multiple simultaneous sends in the
       // same tick and observe collision behavior.
       const s = simRef.current.getState();

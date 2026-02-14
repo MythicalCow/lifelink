@@ -46,6 +46,7 @@ export class MeshSimulator {
   private totalCollisions = 0;
   private hopAccumulator = 0;
   private deliveryCount = 0;
+  private deliveredTrackingIds: Set<string> = new Set();
 
   /* ── Init ──────────────────────────────────────────── */
 
@@ -181,11 +182,23 @@ export class MeshSimulator {
 
   /* ── Public actions ────────────────────────────────── */
 
-  sendMessage(fromId: number, toId: number, payload = "hello"): void {
+  sendMessage(
+    fromId: number,
+    toId: number,
+    payload = "hello",
+    trackingId?: string,
+  ): void {
     const node = this.nodes.get(fromId);
     if (!node) return;
-    node.enqueueData(toId, payload);
-    this.log(`📨 User sent "${payload}" from ${node.label} → Node ${toId}`, "info");
+    // Embed tracking ID in payload so we can confirm delivery later
+    const taggedPayload = trackingId
+      ? `[trk:${trackingId}]${payload}`
+      : payload;
+    node.enqueueData(toId, taggedPayload);
+    this.log(
+      `📨 User sent "${payload}" from ${node.label} → Node ${toId}`,
+      "info",
+    );
   }
 
   reset(sensorNodes: SensorNode[]): void {
@@ -205,6 +218,7 @@ export class MeshSimulator {
     this.totalCollisions = 0;
     this.hopAccumulator = 0;
     this.deliveryCount = 0;
+    this.deliveredTrackingIds.clear();
     this.log("Simulation reset", "info");
   }
 
@@ -217,6 +231,13 @@ export class MeshSimulator {
 
     for (const node of this.nodes.values()) {
       totalKnown += node.knownNodeCount;
+
+      // Build map of labels this node has discovered via gossip
+      const discoveredLabels: Record<number, string> = {};
+      for (const [nid, entry] of node.neighborTable) {
+        discoveredLabels[nid] = entry.label;
+      }
+
       nodeStates.push({
         id: node.id,
         lat: node.lat,
@@ -225,6 +246,7 @@ export class MeshSimulator {
         neighborCount: node.directNeighborCount,
         knownNodes: node.knownNodeCount,
         label: node.label,
+        discoveredLabels,
       });
     }
 
@@ -254,6 +276,7 @@ export class MeshSimulator {
       transmissions: [...this.transmissions],
       events: [...this.events],
       stats,
+      deliveredTrackingIds: [...this.deliveredTrackingIds],
     };
   }
 
@@ -311,6 +334,13 @@ export class MeshSimulator {
       this.totalDelivered++;
       this.hopAccumulator += packet.hopCount;
       this.deliveryCount++;
+
+      // Extract tracking ID from payload for delivery confirmation
+      const trkMatch = packet.payload.match(/\[trk:([^\]]+)\]/);
+      if (trkMatch) {
+        this.deliveredTrackingIds.add(trkMatch[1]);
+      }
+
       this.log(
         `✓ Delivered to ${receiver.label} from Node ${packet.sourceId} (${packet.hopCount} hops)`,
         "success",

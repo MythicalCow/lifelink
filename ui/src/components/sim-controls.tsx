@@ -1,19 +1,15 @@
 "use client";
 
-import { useState } from "react";
 import type { SimState } from "@/simulation/types";
-import type { SensorNode } from "@/types/sensor";
 
 interface SimControlsProps {
   state: SimState | null;
   running: boolean;
   speed: number;
-  nodes: SensorNode[];
   onPlay: () => void;
   onPause: () => void;
   onStep: () => void;
   onToggleSpeed: () => void;
-  onSendMessage: (from: number, to: number) => void;
   onReset: () => void;
 }
 
@@ -21,17 +17,12 @@ export function SimControls({
   state,
   running,
   speed,
-  nodes,
   onPlay,
   onPause,
   onStep,
   onToggleSpeed,
-  onSendMessage,
   onReset,
 }: SimControlsProps) {
-  const [fromId, setFromId] = useState(nodes[0]?.id ?? 1);
-  const [toId, setToId] = useState(nodes[nodes.length - 1]?.id ?? 18);
-
   const stats = state?.stats;
   const events = state?.events ?? [];
 
@@ -74,42 +65,6 @@ export function SimControls({
           Reset
         </button>
       </div>
-
-      {/* Send message */}
-      <div className="flex items-center gap-2">
-        <select
-          value={fromId}
-          onChange={(e) => setFromId(Number(e.target.value))}
-          className="h-7 flex-1 rounded-md bg-[var(--foreground)]/5 px-2 text-[11px] text-[var(--foreground)] outline-none"
-        >
-          {nodes.map((n) => (
-            <option key={n.id} value={n.id}>
-              {n.label ?? `Node ${n.id}`}
-            </option>
-          ))}
-        </select>
-        <span className="text-[10px] text-[var(--muted)]">→</span>
-        <select
-          value={toId}
-          onChange={(e) => setToId(Number(e.target.value))}
-          className="h-7 flex-1 rounded-md bg-[var(--foreground)]/5 px-2 text-[11px] text-[var(--foreground)] outline-none"
-        >
-          {nodes.map((n) => (
-            <option key={n.id} value={n.id}>
-              {n.label ?? `Node ${n.id}`}
-            </option>
-          ))}
-        </select>
-        <button
-          onClick={() => onSendMessage(fromId, toId)}
-          className="flex h-7 items-center justify-center rounded-md bg-[var(--suggest)] px-3 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
-        >
-          Send
-        </button>
-      </div>
-      <p className="text-[10px] leading-snug text-[var(--muted)]/80">
-        For collision tests: pause, queue multiple sends, then click Step.
-      </p>
 
       {/* Stats */}
       {stats && (

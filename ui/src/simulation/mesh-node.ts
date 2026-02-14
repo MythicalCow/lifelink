@@ -130,7 +130,13 @@ export class MeshNode {
     rssi: number,
     currentTick: number,
   ): void {
-    // Direct neighbor entry
+    // Resolve sender's label from their self-entry in gossip
+    const senderSelf = packet.gossipEntries.find(
+      (e) => e.nodeId === packet.sourceId,
+    );
+    const senderLabel = senderSelf?.label ?? `Node ${packet.sourceId}`;
+
+    // Direct neighbor entry — label learned from gossip
     this.neighborTable.set(packet.sourceId, {
       nodeId: packet.sourceId,
       sequenceNum: this.seqNum,
@@ -140,6 +146,7 @@ export class MeshNode {
       lat: packet.originLat,
       lng: packet.originLng,
       viaNode: packet.sourceId,
+      label: senderLabel,
     });
 
     // Process piggybacked gossip
@@ -164,6 +171,7 @@ export class MeshNode {
           lat: entry.lat,
           lng: entry.lng,
           viaNode: packet.sourceId,
+          label: entry.label,
         });
       }
     }
@@ -171,13 +179,14 @@ export class MeshNode {
 
   private getGossipEntries(): GossipEntry[] {
     const entries: GossipEntry[] = [];
-    // Include self
+    // Include self — announce our own name
     entries.push({
       nodeId: this.id,
       sequenceNum: this.seqNum,
       hopsAway: 0,
       lat: this.lat,
       lng: this.lng,
+      label: this.label,
     });
     // Include most recently updated neighbors (up to limit)
     const sorted = [...this.neighborTable.values()]
@@ -190,6 +199,7 @@ export class MeshNode {
         hopsAway: n.hopsAway,
         lat: n.lat,
         lng: n.lng,
+        label: n.label,
       });
     }
     return entries;

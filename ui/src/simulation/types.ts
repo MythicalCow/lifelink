@@ -18,6 +18,8 @@ export interface GossipEntry {
   hopsAway: number;
   lat: number;
   lng: number;
+  /** Self-assigned node name, propagated through gossip */
+  label: string;
 }
 
 /** A packet on the air */
@@ -48,6 +50,8 @@ export interface NeighborEntry {
   lng: number;
   /** Direct neighbor we learned this entry from */
   viaNode: number;
+  /** Name learned from gossip heartbeat */
+  label: string;
 }
 
 /** Visual state of a node for the UI layer */
@@ -58,7 +62,11 @@ export interface NodeVisualState {
   state: "idle" | "tx" | "rx";
   neighborCount: number;
   knownNodes: number;
-  label?: string;
+  /** This node's own name (from its config) */
+  label: string;
+  /** Names of remote nodes this node has discovered via gossip.
+   *  Key = nodeId, Value = label learned from heartbeats. */
+  discoveredLabels: Record<number, string>;
 }
 
 /** An in-flight transmission for the UI */
@@ -100,4 +108,6 @@ export interface SimState {
   transmissions: Transmission[];
   events: SimEvent[];
   stats: SimStats;
+  /** Tracking IDs of user messages confirmed delivered */
+  deliveredTrackingIds: string[];
 }
