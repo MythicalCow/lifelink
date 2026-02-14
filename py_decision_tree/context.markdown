@@ -123,25 +123,11 @@ Template-based generation with:
 - typo injection
 - intent label and urgency label (rule-based)
 
-### Improvements Needed
-1) Separate synthetic data generation into its own file (`data_gen.py`)
-2) Increase diversity and realism:
-   - multi-intent sentences (“need water and medic at camp”)
-   - slang, abbreviations, misspellings, and short fragments (“medic 2 ppl bridge asap”)
-   - adversarial text (spam, repeated false alarms)
-   - false keyword hits (“this is fire”, “shooting a video”)
-3) Add a real human-written dataset:
-   - teammates write 50–100 sentences per category
-   - include typos, slang, and realistic phrasing
-4) Reframe labels around the gate:
-   - generate a larger set of normal chat messages
-   - ensure the dataset is not overly separable by templates
-
 Recommended scale:
 - 20,000+ synthetic examples
 - 500–2,000 human-written examples
 
-## Codebase Structure (Recommended)
+## Codebase Structure 
 - `data_gen.py`
   - templates, keyword lists, typo injection
   - `make_dataset(n_per_intent, n_normal, seed) -> DataFrame`
