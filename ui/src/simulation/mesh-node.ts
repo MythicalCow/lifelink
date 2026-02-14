@@ -1,6 +1,7 @@
 /* ── MeshNode ─────────────────────────────────────────
  * Per-node protocol logic: Epidemic Gossip membership
- * + Geographic Greedy routing.  Pure state machine.
+ * + Geographic Greedy routing + RSSI Trilateration.
+ * Pure state machine — no hardcoded positions.
  * ───────────────────────────────────────────────────── */
 
 import {
@@ -18,15 +19,53 @@ import {
   NEIGHBOR_EXPIRY,
   DEDUP_BUFFER_SIZE,
 } from "./config";
-import { haversine, xorshift32 } from "./utils";
+import {
+  haversine,
+  xorshift32,
+  ftmMeasureDistance,
+  trilaterate,
+  type AnchorReading,
+} from "./utils";
 
 export class MeshNode {
   id: number;
-  lat: number;
-  lng: number;
   label: string;
 
+  /**
+   * TRUE position — only used by the simulator for physics (RSSI calc).
+   * The node itself does NOT know this; it's "god mode" for the sim.
+   */
+  trueLat: number;
+  trueLng: number;
+
+  /**
+   * ESTIMATED position — what the node believes based on trilateration.
+   * Starts at (0,0) until enough anchor readings arrive.
+   */
+  estLat = 0;
+  estLng = 0;
+
+  /**
+   * Position confidence: 0 = unknown, 1 = anchor (has GPS).
+   * Intermediate values = trilaterated with varying certainty.
+   */
+  posConfidence = 0;
+
+  /** Is this node an anchor (has GPS/known position)? */
+  isAnchor: boolean;
+
   neighborTable: Map<number, NeighborEntry> = new Map();
+
+  /**
+   * FTM ranging results from direct neighbors.
+   * In real hardware: ESP32-S3 performs 802.11mc FTM ranging.
+   * Here we simulate with true distance + noise.
+   */
+  private ftmReadings: Map<
+    number,
+    { distance: number; trueLat: number; trueLng: number; tick: number }
+  > = new Map();
+
   private seqNum = 0;
   private packetCounter = 0;
   private nextBeaconTick: number;
@@ -39,11 +78,26 @@ export class MeshNode {
   /** Outbound queue — simulator pulls from this */
   txQueue: MeshPacket[] = [];
 
-  constructor(id: number, lat: number, lng: number, label: string) {
+  constructor(
+    id: number,
+    trueLat: number,
+    trueLng: number,
+    label: string,
+    isAnchor: boolean,
+  ) {
     this.id = id;
-    this.lat = lat;
-    this.lng = lng;
+    this.trueLat = trueLat;
+    this.trueLng = trueLng;
     this.label = label;
+    this.isAnchor = isAnchor;
+
+    // Anchors know their true position; others start unknown
+    if (isAnchor) {
+      this.estLat = trueLat;
+      this.estLng = trueLng;
+      this.posConfidence = 1;
+    }
+
     this.rng = xorshift32(id * 7919 + 1);
     this.nextBeaconTick =
       Math.floor(this.rng() * BEACON_INTERVAL) + BEACON_JITTER;
@@ -53,11 +107,17 @@ export class MeshNode {
 
   /** Called once per simulation tick. May enqueue a heartbeat. */
   tick(currentTick: number): void {
-    // Expire old neighbors
+    // Expire old neighbors and FTM readings
     for (const [nid, entry] of this.neighborTable) {
       if (currentTick - entry.lastSeenTick > NEIGHBOR_EXPIRY) {
         this.neighborTable.delete(nid);
+        this.ftmReadings.delete(nid);
       }
+    }
+
+    // Attempt trilateration if not an anchor and we have readings
+    if (!this.isAnchor) {
+      this.attemptTrilateration();
     }
 
     // Beacon timer
@@ -68,6 +128,84 @@ export class MeshNode {
         BEACON_INTERVAL +
         Math.floor(this.rng() * BEACON_JITTER);
     }
+  }
+
+  /**
+   * Perform FTM ranging to a neighbor.
+   * Called by the simulator when this node can "see" another node.
+   * In real hardware: ESP32-S3 initiates 802.11mc FTM request.
+   *
+   * @param neighborId - ID of the neighbor node
+   * @param trueDistance - Actual distance in meters (simulator knows this)
+   * @param neighborTrueLat - Neighbor's true lat (for anchor reference)
+   * @param neighborTrueLng - Neighbor's true lng (for anchor reference)
+   * @param currentTick - Current simulation tick
+   */
+  performFtmRanging(
+    neighborId: number,
+    trueDistance: number,
+    neighborTrueLat: number,
+    neighborTrueLng: number,
+    currentTick: number,
+  ): void {
+    // Simulate FTM measurement with realistic noise (~1-2m accuracy)
+    const measuredDistance = ftmMeasureDistance(trueDistance, this.rng);
+
+    this.ftmReadings.set(neighborId, {
+      distance: measuredDistance,
+      trueLat: neighborTrueLat,
+      trueLng: neighborTrueLng,
+      tick: currentTick,
+    });
+  }
+
+  /* ── Trilateration (FTM-based) ────────────────────────
+   * Uses 802.11mc Fine Timing Measurement distances.
+   * Much more accurate than RSSI (~1-2m vs ~5-10m error).
+   * ─────────────────────────────────────────────────── */
+
+  private attemptTrilateration(): void {
+    // Collect anchor readings from direct neighbors with known positions
+    const anchors: AnchorReading[] = [];
+
+    for (const [nid, entry] of this.neighborTable) {
+      // Only use direct neighbors (hopsAway === 1) with confident positions
+      if (entry.hopsAway !== 1) continue;
+      if (entry.posConfidence < 0.5) continue;
+
+      // Get FTM ranging result for this neighbor
+      const ftm = this.ftmReadings.get(nid);
+      if (!ftm) continue;
+
+      // Use the neighbor's ANNOUNCED position (from gossip) for trilateration
+      // This is what they claim their position is
+      anchors.push({
+        lat: entry.lat,
+        lng: entry.lng,
+        distance: ftm.distance,
+      });
+    }
+
+    // Need at least 3 anchors for trilateration
+    if (anchors.length < 3) return;
+
+    const result = trilaterate(anchors);
+    if (!result) return;
+
+    // Update estimated position with some smoothing
+    // FTM is accurate enough that we can use less smoothing
+    const alpha = 0.5; // higher alpha = faster convergence (FTM is reliable)
+    if (this.posConfidence > 0) {
+      this.estLat = this.estLat * (1 - alpha) + result.lat * alpha;
+      this.estLng = this.estLng * (1 - alpha) + result.lng * alpha;
+    } else {
+      this.estLat = result.lat;
+      this.estLng = result.lng;
+    }
+
+    // Confidence based on number of anchors
+    // FTM gives higher confidence than RSSI would
+    this.posConfidence = Math.min(0.5 + anchors.length * 0.1, 0.95);
   }
 
   /* ── Receive ───────────────────────────────────────── */
@@ -119,8 +257,9 @@ export class MeshNode {
       ttl: 1,
       hopCount: 0,
       payload: "",
-      originLat: this.lat,
-      originLng: this.lng,
+      // Use ESTIMATED position in packets (what we believe, not truth)
+      originLat: this.estLat,
+      originLng: this.estLng,
       gossipEntries: entries,
     };
   }
@@ -130,13 +269,17 @@ export class MeshNode {
     rssi: number,
     currentTick: number,
   ): void {
-    // Resolve sender's label from their self-entry in gossip
+    // Note: FTM ranging is done separately by the simulator.
+    // RSSI is still used for link quality estimation but not positioning.
+
+    // Resolve sender's info from their self-entry in gossip
     const senderSelf = packet.gossipEntries.find(
       (e) => e.nodeId === packet.sourceId,
     );
     const senderLabel = senderSelf?.label ?? `Node ${packet.sourceId}`;
+    const senderConfidence = senderSelf?.posConfidence ?? 0;
 
-    // Direct neighbor entry — label learned from gossip
+    // Direct neighbor entry — position from gossip (their estimate)
     this.neighborTable.set(packet.sourceId, {
       nodeId: packet.sourceId,
       sequenceNum: this.seqNum,
@@ -145,6 +288,7 @@ export class MeshNode {
       rssi,
       lat: packet.originLat,
       lng: packet.originLng,
+      posConfidence: senderConfidence,
       viaNode: packet.sourceId,
       label: senderLabel,
     });
@@ -170,6 +314,7 @@ export class MeshNode {
           rssi: rssi * 0.6, // degraded estimate
           lat: entry.lat,
           lng: entry.lng,
+          posConfidence: entry.posConfidence * 0.9, // degrade confidence
           viaNode: packet.sourceId,
           label: entry.label,
         });
@@ -179,13 +324,14 @@ export class MeshNode {
 
   private getGossipEntries(): GossipEntry[] {
     const entries: GossipEntry[] = [];
-    // Include self — announce our own name
+    // Include self — announce our estimated position
     entries.push({
       nodeId: this.id,
       sequenceNum: this.seqNum,
       hopsAway: 0,
-      lat: this.lat,
-      lng: this.lng,
+      lat: this.estLat,
+      lng: this.estLng,
+      posConfidence: this.posConfidence,
       label: this.label,
     });
     // Include most recently updated neighbors (up to limit)
@@ -199,6 +345,7 @@ export class MeshNode {
         hopsAway: n.hopsAway,
         lat: n.lat,
         lng: n.lng,
+        posConfidence: n.posConfidence,
         label: n.label,
       });
     }
@@ -220,8 +367,8 @@ export class MeshNode {
         ttl: MAX_TTL,
         hopCount: 0,
         payload: `ACK:${packet.id}`,
-        originLat: this.lat,
-        originLng: this.lng,
+        originLat: this.estLat,
+        originLng: this.estLng,
         gossipEntries: [],
       };
     }
@@ -248,15 +395,21 @@ export class MeshNode {
     const direct = this.neighborTable.get(destId);
     if (direct && direct.hopsAway === 1) return destId;
 
-    // 2. Geographic greedy forwarding
+    // 2. Geographic greedy forwarding (using estimated positions)
     const destEntry = this.neighborTable.get(destId);
-    if (destEntry) {
-      const myDist = haversine(this.lat, this.lng, destEntry.lat, destEntry.lng);
+    if (destEntry && destEntry.posConfidence > 0.3) {
+      const myDist = haversine(
+        this.estLat,
+        this.estLng,
+        destEntry.lat,
+        destEntry.lng,
+      );
       let bestId: number | null = null;
       let bestDist = myDist; // must improve on our distance
 
       for (const [nid, n] of this.neighborTable) {
         if (n.hopsAway !== 1) continue; // direct neighbors only
+        if (n.posConfidence < 0.3) continue; // need confident position
         const d = haversine(n.lat, n.lng, destEntry.lat, destEntry.lng);
         if (d < bestDist) {
           bestDist = d;
@@ -284,6 +437,12 @@ export class MeshNode {
       return bestId;
     }
 
+    // 5. No position info — fall back to gradient (via node)
+    if (destEntry && destEntry.viaNode !== this.id) {
+      const via = this.neighborTable.get(destEntry.viaNode);
+      if (via && via.hopsAway === 1) return destEntry.viaNode;
+    }
+
     return null; // no knowledge of destination
   }
 
@@ -309,8 +468,8 @@ export class MeshNode {
       ttl: MAX_TTL,
       hopCount: 0,
       payload,
-      originLat: this.lat,
-      originLng: this.lng,
+      originLat: this.estLat,
+      originLng: this.estLng,
       gossipEntries: [],
     });
   }

@@ -15,6 +15,7 @@ import {
 } from "./types";
 import {
   RADIO_RANGE_M,
+  FTM_RANGE_M,
   CAPTURE_THRESHOLD_DB,
   TX_VISUAL_DURATION,
   MAX_LOG_EVENTS,
@@ -52,9 +53,17 @@ export class MeshSimulator {
 
   constructor(sensorNodes: SensorNode[]) {
     for (const sn of sensorNodes) {
+      // Use explicit isAnchor flag if provided, otherwise default to false
+      const isAnchor = sn.isAnchor ?? false;
       this.nodes.set(
         sn.id,
-        new MeshNode(sn.id, sn.lat, sn.lng, sn.label ?? `Node ${sn.id}`),
+        new MeshNode(
+          sn.id,
+          sn.lat,
+          sn.lng,
+          sn.label ?? `Node ${sn.id}`,
+          isAnchor,
+        ),
       );
     }
   }
@@ -70,7 +79,12 @@ export class MeshSimulator {
       node.state = "idle";
     }
 
-    // 1. Each node runs its internal tick (beacon timers, expiry)
+    // 0. Perform FTM ranging between nearby nodes
+    // In real hardware: ESP32-S3 does 802.11mc ranging via Wi-Fi
+    // Here we simulate by providing true distances + noise
+    this.performFtmRangingPhase();
+
+    // 1. Each node runs its internal tick (beacon timers, expiry, trilateration)
     for (const node of this.nodes.values()) {
       node.tick(this.tick);
     }
@@ -98,11 +112,12 @@ export class MeshSimulator {
         if (receiver.id === sender.id) continue;
         if (receiver.state === "tx") continue; // cannot RX while TX
 
+        // Use TRUE positions for physics (radio propagation)
         const dist = haversine(
-          sender.lat,
-          sender.lng,
-          receiver.lat,
-          receiver.lng,
+          sender.trueLat,
+          sender.trueLng,
+          receiver.trueLat,
+          receiver.trueLng,
         );
         if (dist > RADIO_RANGE_M) continue;
 
@@ -204,9 +219,16 @@ export class MeshSimulator {
   reset(sensorNodes: SensorNode[]): void {
     this.nodes.clear();
     for (const sn of sensorNodes) {
+      const isAnchor = sn.isAnchor ?? false;
       this.nodes.set(
         sn.id,
-        new MeshNode(sn.id, sn.lat, sn.lng, sn.label ?? `Node ${sn.id}`),
+        new MeshNode(
+          sn.id,
+          sn.lat,
+          sn.lng,
+          sn.label ?? `Node ${sn.id}`,
+          isAnchor,
+        ),
       );
     }
     this.tick = 0;
@@ -240,8 +262,11 @@ export class MeshSimulator {
 
       nodeStates.push({
         id: node.id,
-        lat: node.lat,
-        lng: node.lng,
+        trueLat: node.trueLat,
+        trueLng: node.trueLng,
+        estLat: node.estLat,
+        estLng: node.estLng,
+        posConfidence: node.posConfidence,
         state: node.state,
         neighborCount: node.directNeighborCount,
         knownNodes: node.knownNodeCount,
@@ -282,6 +307,41 @@ export class MeshSimulator {
 
   /* ── Internal helpers ──────────────────────────────── */
 
+  /**
+   * Simulate FTM (802.11mc) ranging phase.
+   * Each node performs Wi-Fi RTT ranging to nearby nodes.
+   * This happens before the main tick so trilateration has fresh data.
+   */
+  private performFtmRangingPhase(): void {
+    for (const node of this.nodes.values()) {
+      // Only non-anchors need to range (anchors know their position)
+      if (node.isAnchor) continue;
+
+      // Find all nodes in FTM range and perform ranging
+      for (const other of this.nodes.values()) {
+        if (other.id === node.id) continue;
+
+        const dist = haversine(
+          node.trueLat,
+          node.trueLng,
+          other.trueLat,
+          other.trueLng,
+        );
+
+        if (dist <= FTM_RANGE_M) {
+          // Perform FTM ranging — node measures distance to other
+          node.performFtmRanging(
+            other.id,
+            dist,
+            other.trueLat,
+            other.trueLng,
+            this.tick,
+          );
+        }
+      }
+    }
+  }
+
   private log(message: string, level: SimEvent["level"]): void {
     this.events.push({ tick: this.tick, message, level });
   }
@@ -316,10 +376,10 @@ export class MeshSimulator {
     receiver.state = "rx";
 
     this.transmissions.push({
-      fromLat: sender.lat,
-      fromLng: sender.lng,
-      toLat: receiver.lat,
-      toLng: receiver.lng,
+      fromLat: sender.trueLat,
+      fromLng: sender.trueLng,
+      toLat: receiver.trueLat,
+      toLng: receiver.trueLng,
       packetType: packet.type,
       status,
       createdTick: this.tick,
@@ -357,10 +417,10 @@ export class MeshSimulator {
     const { sender, receiver, packet } = candidate;
 
     this.transmissions.push({
-      fromLat: sender.lat,
-      fromLng: sender.lng,
-      toLat: receiver.lat,
-      toLng: receiver.lng,
+      fromLat: sender.trueLat,
+      fromLng: sender.trueLng,
+      toLat: receiver.trueLat,
+      toLng: receiver.trueLng,
       packetType: packet.type,
       status: "collision",
       createdTick: this.tick,

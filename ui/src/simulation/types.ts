@@ -16,8 +16,11 @@ export interface GossipEntry {
   nodeId: number;
   sequenceNum: number;
   hopsAway: number;
+  /** Estimated position (from trilateration, not GPS) */
   lat: number;
   lng: number;
+  /** Confidence: 0 = unknown, 1 = anchor (GPS), 0.1-0.9 = trilaterated */
+  posConfidence: number;
   /** Self-assigned node name, propagated through gossip */
   label: string;
 }
@@ -46,8 +49,10 @@ export interface NeighborEntry {
   hopsAway: number;
   lastSeenTick: number;
   rssi: number;
+  /** Estimated position (from gossip) */
   lat: number;
   lng: number;
+  posConfidence: number;
   /** Direct neighbor we learned this entry from */
   viaNode: number;
   /** Name learned from gossip heartbeat */
@@ -57,8 +62,14 @@ export interface NeighborEntry {
 /** Visual state of a node for the UI layer */
 export interface NodeVisualState {
   id: number;
-  lat: number;
-  lng: number;
+  /** True position (for physics/rendering — "god mode") */
+  trueLat: number;
+  trueLng: number;
+  /** Estimated position (what the node believes via trilateration) */
+  estLat: number;
+  estLng: number;
+  /** Position confidence: 0 = unknown, 1 = anchor/GPS */
+  posConfidence: number;
   state: "idle" | "tx" | "rx";
   neighborCount: number;
   knownNodes: number;

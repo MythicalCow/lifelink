@@ -1,19 +1,19 @@
 "use client";
 
-export type ViewMode = "map" | "messages";
+export type ViewMode = "map" | "messages" | "sensors";
 
 interface HeaderProps {
   view: ViewMode;
   onViewChange: (view: ViewMode) => void;
   nodeCount: number;
-  suggestionCount: number;
+  anchorCount: number;
 }
 
 export function Header({
   view,
   onViewChange,
   nodeCount,
-  suggestionCount,
+  anchorCount,
 }: HeaderProps) {
   return (
     <header className="absolute inset-x-0 top-0 z-[1000] flex items-center justify-between px-8 py-5">
@@ -26,7 +26,7 @@ export function Header({
       <div className="absolute left-1/2 -translate-x-1/2 flex h-8 items-center rounded-full bg-[var(--foreground)]/[0.06] p-0.5 backdrop-blur-sm">
         <button
           onClick={() => onViewChange("map")}
-          className={`rounded-full px-5 py-1.5 text-xs font-medium transition-all duration-200 ${
+          className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all duration-200 ${
             view === "map"
               ? "bg-white text-[var(--foreground)] shadow-sm"
               : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
@@ -36,7 +36,7 @@ export function Header({
         </button>
         <button
           onClick={() => onViewChange("messages")}
-          className={`rounded-full px-5 py-1.5 text-xs font-medium transition-all duration-200 ${
+          className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all duration-200 ${
             view === "messages"
               ? "bg-white text-[var(--foreground)] shadow-sm"
               : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
@@ -44,17 +44,27 @@ export function Header({
         >
           Messages
         </button>
+        <button
+          onClick={() => onViewChange("sensors")}
+          className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all duration-200 ${
+            view === "sensors"
+              ? "bg-white text-[var(--foreground)] shadow-sm"
+              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
+          }`}
+        >
+          Setup
+        </button>
       </div>
 
       {/* Status */}
       <nav className="flex items-center gap-5">
         <span className="flex items-center gap-2 text-xs text-[var(--muted)]">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
-          {nodeCount} active
+          {nodeCount} nodes
         </span>
         <span className="flex items-center gap-2 text-xs text-[var(--muted)]/60">
-          <span className="inline-block h-1.5 w-1.5 rounded-full border border-dashed border-[var(--suggest)]" />
-          {suggestionCount} suggested
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+          {anchorCount} anchors
         </span>
       </nav>
     </header>

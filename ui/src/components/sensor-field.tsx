@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import type { SensorNode, SuggestedNode } from "@/types/sensor";
+import type { SuggestedNode } from "@/types/sensor";
 import type { SimState } from "@/simulation/types";
 
 const LeafletMap = dynamic(
@@ -10,7 +10,6 @@ const LeafletMap = dynamic(
 );
 
 interface SensorFieldProps {
-  nodes: SensorNode[];
   suggestions: SuggestedNode[];
   center: [number, number];
   zoom: number;
@@ -18,7 +17,6 @@ interface SensorFieldProps {
 }
 
 export function SensorField({
-  nodes,
   suggestions,
   center,
   zoom,
@@ -29,7 +27,6 @@ export function SensorField({
       <LeafletMap
         center={center}
         zoom={zoom}
-        nodes={nodes}
         suggestions={suggestions}
         simState={simState}
       />

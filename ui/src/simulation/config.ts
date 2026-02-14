@@ -1,9 +1,14 @@
 /* ── Simulation Parameters ─────────────────────────────
- * Tunables that map to real LoRa constraints.
+ * Tunables that map to real LoRa + Wi-Fi FTM constraints.
  * ───────────────────────────────────────────────────── */
 
-/** Radio range in meters (LoRa on campus w/ buildings) */
+/** LoRa radio range in meters (campus w/ buildings) */
 export const RADIO_RANGE_M = 450;
+
+/** FTM (802.11mc) ranging distance in meters.
+ *  Real hardware: ~50m indoor, ~100m outdoor.
+ *  Bumped for simulation demo. */
+export const FTM_RANGE_M = 200;
 
 /** Capture effect threshold in dB (strongest packet wins if above threshold) */
 export const CAPTURE_THRESHOLD_DB = 6;
