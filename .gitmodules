@@ -1,0 +1,3 @@
+[submodule "esp32/drivers/Heltec_ESP32"]
+	path = esp32/drivers/Heltec_ESP32
+	url = https://github.com/HelTecAutomation/Heltec_ESP32.git
