@@ -10,6 +10,10 @@
 
 </div>
 
+> [!IMPORTANT]
+> 📄 **Technical Report:**  
+> Read the full report here: **[LifeLink Technical Report (PDF)](technical_report/LifeLink_TechnicalReport.pdf)**
+
 ## The Problem
 
 When internet is cut, cell towers are down, and Wi-Fi is blocked, civilians lose the ability to do three critical things: **ask for help**, **share safety information**, and **avoid dangerous areas**. Existing communication infrastructure is centralized and fragile by design. There are no options for a normal person caught in a blackout zone.
@@ -156,18 +160,6 @@ npm run dev
 | Beacon interval | ~4 sec | Heartbeat + gossip propagation |
 | Max TTL | 12 hops | Network diameter limit |
 | Neighbor expiry | ~20 sec | Stale route cleanup |
-
-## Demo
-
-The live demo showcases:
-
-- **One-button node setup** — power on, auto-mesh
-- **Phone-to-node messaging** — Bluetooth connection, type and send
-- **Automatic compression** — crisis language detection into structured packets
-- **Prioritized emergency propagation** — urgent messages get preferential routing
-- **Trust-based verification** — k-of-n confirmation from independent nodes
-- **Interference detection** — RSSI/SNR monitoring with adaptive channel switching
-- **Live dashboard** — real-time mesh state, node map, and alert visualization
 
 ## License
 
