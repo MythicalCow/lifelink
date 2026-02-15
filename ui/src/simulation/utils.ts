@@ -117,8 +117,8 @@ export function trilaterate(
   if (anchors.length < 3) return null;
 
   // Use centroid as initial guess
-  let estLat = anchors.reduce((s, a) => s + a.lat, 0) / anchors.length;
-  let estLng = anchors.reduce((s, a) => s + a.lng, 0) / anchors.length;
+  const estLat = anchors.reduce((s, a) => s + a.lat, 0) / anchors.length;
+  const estLng = anchors.reduce((s, a) => s + a.lng, 0) / anchors.length;
 
   const { latM, lngM } = metersPerDegree(estLat);
 

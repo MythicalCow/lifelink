@@ -224,7 +224,7 @@ export function Sensors({ onNodeConfigured }: SensorsProps) {
                   </div>
                 ) : (
                   <div className="text-sm text-[var(--muted)]">
-                    No devices found. Click "Scan" to search.
+                    No devices found. Click &quot;Scan&quot; to search.
                   </div>
                 )}
               </div>
@@ -402,7 +402,7 @@ export function Sensors({ onNodeConfigured }: SensorsProps) {
                 <ol className="mt-2 list-decimal list-inside space-y-1">
                   <li>Power on your LifeLink ESP32 device</li>
                   <li>Wait for the blue LED to blink (BLE advertising)</li>
-                  <li>Click "Scan for Nodes" above</li>
+                  <li>Click &quot;Scan for Nodes&quot; above</li>
                   <li>Select your device and configure it</li>
                 </ol>
               </div>

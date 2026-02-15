@@ -1,183 +1,56 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
-import { Header, type ViewMode } from "@/components/header";
-import { SensorField } from "@/components/sensor-field";
-import { Messenger, type ChatMessage } from "@/components/messenger";
-import { HardwareSetup } from "@/components/hardware-setup";
-import { useGatewayBridge } from "@/hooks/use-gateway-bridge";
-import type { SensorNode } from "@/types/sensor";
-import {
-  SUGGESTED_NODES,
-  MAP_CENTER,
-  MAP_ZOOM,
-} from "@/config/nodes";
-
-// Start with no nodes — user adds them via Sensors tab
-const INITIAL_NODES: SensorNode[] = [];
+import { useState } from "react";
+import Link from "next/link";
 
 export default function Home() {
-  const [view, setView] = useState<ViewMode>("sensors"); // Start on sensors to add nodes
-  const [nodes, setNodes] = useState<SensorNode[]>(INITIAL_NODES);
-  const nextNodeId = useRef(1);
-  const gateway = useGatewayBridge();
-
-  /* ── Lifted message state — persists across tab switches ── */
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const msgCounterRef = useRef(0);
-
-  /* ── Node configured via BLE (from Sensors tab) ── */
-  const handleNodeConfigured = useCallback((config: {
-    name: string;
-    lat: number;
-    lng: number;
-    isAnchor: boolean;
-    hardwareIdHex: string;
-    bleAddress: string;
-  }) => {
-    setNodes((prev) => {
-      const existingIdx = prev.findIndex(
-        (n) => (n.hardwareIdHex || "").toUpperCase() === config.hardwareIdHex.toUpperCase(),
-      );
-
-      const nextNode: SensorNode = {
-        id: existingIdx >= 0 ? prev[existingIdx].id : nextNodeId.current++,
-        lat: config.lat,
-        lng: config.lng,
-        label: config.name,
-        radius: 170,
-        isAnchor: config.isAnchor,
-        hardwareIdHex: config.hardwareIdHex.toUpperCase(),
-        bleAddress: config.bleAddress,
-        locationKnown: true,
-      };
-
-      if (existingIdx >= 0) {
-        const copy = [...prev];
-        copy[existingIdx] = nextNode;
-        return copy;
-      }
-      return [...prev, nextNode];
-    });
-  }, []);
-
-  useEffect(() => {
-    if (gateway.members.length === 0) return;
-    setNodes((prev) => {
-      let changed = false;
-      const next = [...prev];
-      for (const member of gateway.members) {
-        const hex = (member.node_id || "").toUpperCase();
-        if (!hex) continue;
-        const idx = next.findIndex(
-          (n) => (n.hardwareIdHex || "").toUpperCase() === hex,
-        );
-        const memberLabel =
-          member.name && member.name !== "unknown" ? member.name : `Node-${hex}`;
-        if (idx >= 0) {
-          const cur = next[idx];
-          const isGenericLabel =
-            !cur.label ||
-            cur.label.startsWith("Node-") ||
-            cur.label.startsWith("Node ");
-          if (member.name && member.name !== "unknown" && isGenericLabel && cur.label !== member.name) {
-            next[idx] = { ...cur, label: member.name };
-            changed = true;
-          }
-          continue;
-        }
-
-        const hash = parseInt(hex, 16) || 0;
-        const angle = ((hash % 360) * Math.PI) / 180;
-        const ring = 0.00035 + ((hash >> 4) % 5) * 0.00005;
-        next.push({
-          id: nextNodeId.current++,
-          lat: MAP_CENTER[0] + Math.sin(angle) * ring,
-          lng: MAP_CENTER[1] + Math.cos(angle) * ring,
-          radius: 170,
-          label: memberLabel,
-          isAnchor: false,
-          hardwareIdHex: hex,
-          locationKnown: false,
-        });
-        changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, [gateway.members]);
-
-  /* ── Derived counts ── */
-  const anchorCount = nodes.filter((n) => n.isAnchor).length;
+  const [selectedMode, setSelectedMode] = useState<"hardware" | null>(null);
 
   return (
-    <main className="relative h-screen w-screen overflow-hidden bg-[var(--surface)]">
-      <Header
-        view={view}
-        onViewChange={setView}
-        nodeCount={nodes.length}
-        anchorCount={anchorCount}
-      />
+    <main className="h-screen w-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col items-center justify-center gap-12 px-4">
+      <div className="text-center">
+        <h1 className="text-6xl font-bold text-white mb-4">LifeLink</h1>
+        <p className="text-xl text-slate-300">
+          Human flourishing tracker — Mesh network for emergency communications
+        </p>
+      </div>
 
-      {/* ── Map view ───────────────────────────────────── */}
-      {view === "map" && (
-        <>
-          <SensorField
-            nodes={nodes}
-            suggestions={SUGGESTED_NODES}
-            center={MAP_CENTER}
-            zoom={MAP_ZOOM}
-          />
-        </>
-      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl w-full">
+        {/* Hardware Mode */}
+        <Link
+          href="/hardware"
+          className="group relative flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-slate-700 bg-slate-800/50 px-8 py-12 backdrop-blur transition-all hover:border-emerald-500/50 hover:bg-emerald-900/20"
+        >
+          <div className="text-5xl">📡</div>
+          <h2 className="text-2xl font-bold text-white">Hardware Mode</h2>
+          <p className="text-center text-slate-300">
+            Connect to real ESP32 nodes and interact with live mesh networks
+          </p>
+          <div className="mt-4 flex items-center gap-2 text-emerald-400 opacity-0 transition-opacity group-hover:opacity-100">
+            <span>Launch Hardware</span>
+            <span>→</span>
+          </div>
+        </Link>
 
-      {/* ── Messages view ──────────────────────────────── */}
-      {view === "messages" && (
-        <Messenger
-          nodes={nodes}
-          messages={messages}
-          setMessages={setMessages}
-          msgCounterRef={msgCounterRef}
-          gatewayOnline={gateway.online}
-          gatewayState={gateway.state}
-          gatewayDevices={gateway.devices}
-          gatewayMembers={gateway.members}
-          gatewayLogs={gateway.logs}
-          onGatewayScan={gateway.scan}
-          onGatewayConnect={gateway.connect}
-          onGatewayDisconnect={gateway.disconnect}
-          onGatewayCommand={gateway.command}
-          onGatewayClearMessages={gateway.clearMessages}
-        />
-      )}
+        {/* Simulation Mode */}
+        <Link
+          href="/simulation"
+          className="group relative flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-slate-700 bg-slate-800/50 px-8 py-12 backdrop-blur transition-all hover:border-blue-500/50 hover:bg-blue-900/20"
+        >
+          <div className="text-5xl">🔬</div>
+          <h2 className="text-2xl font-bold text-white">Simulation Mode</h2>
+          <p className="text-center text-slate-300">
+            Test mesh protocols, malicious nodes, and network resilience
+          </p>
+          <div className="mt-4 flex items-center gap-2 text-blue-400 opacity-0 transition-opacity group-hover:opacity-100">
+            <span>Launch Simulator</span>
+            <span>→</span>
+          </div>
+        </Link>
+      </div>
 
-      {/* ── Sensors view (BLE node configuration) ─────── */}
-      {view === "sensors" && (
-        <HardwareSetup
-          online={gateway.online}
-          state={gateway.state}
-          devices={gateway.devices}
-          nodes={nodes}
-          onScan={gateway.scan}
-          onConnect={gateway.connect}
-          onDisconnect={gateway.disconnect}
-          onCommand={gateway.command}
-          onNodeConfigured={handleNodeConfigured}
-        />
-      )}
-
-      <footer className="absolute inset-x-0 bottom-0 z-[1000] flex items-center justify-between px-8 py-4 text-[11px] text-[var(--muted)]">
-        <span>LifeLink v0.1.0</span>
-        <span>
-          {view === "map"
-            ? "Stanford Campus — Mesh Simulation"
-            : view === "messages"
-              ? "Stanford Campus — Mesh Messenger"
-              : "Stanford Campus — Node Setup"}
-        </span>
-        <span>
-          Gateway {gateway.online ? (gateway.state.connected ? `connected 0x${gateway.state.node_id}` : "online") : "offline"}
-          {gateway.state.connected && ` · hop ch${gateway.state.hop_channel} ${gateway.state.hop_frequency_mhz.toFixed(1)}MHz`}
-        </span>
+      <footer className="absolute bottom-8 text-center text-sm text-slate-400">
+        <p>LifeLink v0.2.0 — Multi-hop mesh for decentralized connectivity</p>
       </footer>
     </main>
   );

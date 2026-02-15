@@ -40,6 +40,8 @@ export interface MeshPacket {
   originLng: number;
   /** Gossip payload (heartbeat only) */
   gossipEntries: GossipEntry[];
+  /** Radio type used for transmission (BLE for short range, LoRa for long range) */
+  radioType: "BLE" | "LoRa";
 }
 
 /** One row in a node's neighbor/routing table */
@@ -75,9 +77,26 @@ export interface NodeVisualState {
   knownNodes: number;
   /** This node's own name (from its config) */
   label: string;
+  /** Node IDs this node currently trusts */
+  trustedPeers: number[];
   /** Names of remote nodes this node has discovered via gossip.
    *  Key = nodeId, Value = label learned from heartbeats. */
   discoveredLabels: Record<number, string>;
+  /** Messages received by this node */
+  receivedMessages: Array<{
+    id: string;
+    fromNodeId: number;
+    text: string;
+    timestamp: number;
+    hopCount: number;
+  }>;
+  /** Bandit stats for message delivery: key = "frequency:recipientId" */
+  banditStats?: Record<string, {
+    successCount: number;
+    failureCount: number;
+    totalAttempts: number;
+    successRate: number;
+  }>;
 }
 
 /** An in-flight transmission for the UI */
@@ -88,8 +107,14 @@ export interface Transmission {
   toLng: number;
   packetType: PacketType;
   /** Whether this on-air attempt was received or collided */
-  status: "ok" | "collision" | "captured";
+  status: "ok" | "collision" | "captured" | "jammed";
   createdTick: number;
+  /** Channel the transmission was on (0-7) */
+  channel: number;
+  /** Whether the sender is a malicious node */
+  isMalicious: boolean;
+  /** Radio type used for transmission (BLE for short range, LoRa for long range) */
+  radioType: "BLE" | "LoRa";
 }
 
 /** A log event for the UI */

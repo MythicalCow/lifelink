@@ -1,9 +1,13 @@
 /* ── MeshSimulator ────────────────────────────────────
  * Orchestrates ticks, models the radio channel, and
  * collects visual state for the UI.
+ * Now uses Environment for RF physics and supports
+ * MaliciousNode variants.
  * ───────────────────────────────────────────────────── */
 
 import { MeshNode } from "./mesh-node";
+import { MaliciousNode } from "./malicious-node";
+import { Environment } from "./environment";
 import {
   PacketType,
   type MeshPacket,
@@ -13,31 +17,19 @@ import {
   type NodeVisualState,
   type SimState,
 } from "./types";
-import {
-  RADIO_RANGE_M,
-  FTM_RANGE_M,
-  CAPTURE_THRESHOLD_DB,
-  TX_VISUAL_DURATION,
-  MAX_LOG_EVENTS,
-} from "./config";
+import { FTM_RANGE_M, TX_VISUAL_DURATION, MAX_LOG_EVENTS } from "./config";
 import { haversine } from "./utils";
 import type { SensorNode } from "@/types/sensor";
-
-interface AirPacket {
-  sender: MeshNode;
-  packet: MeshPacket;
-}
-
-interface ReceptionCandidate {
-  sender: MeshNode;
-  receiver: MeshNode;
-  packet: MeshPacket;
-  rssi: number;
-}
 
 export class MeshSimulator {
   nodes: Map<number, MeshNode> = new Map();
   tick = 0;
+  
+  /** RF environment simulator */
+  environment: Environment;
+
+  /** When true, nodes only route through trusted peers */
+  private trustedOnlyRouting = false;
 
   private transmissions: Transmission[] = [];
   private events: SimEvent[] = [];
@@ -52,19 +44,39 @@ export class MeshSimulator {
   /* ── Init ──────────────────────────────────────────── */
 
   constructor(sensorNodes: SensorNode[]) {
+    this.environment = new Environment();
+    
     for (const sn of sensorNodes) {
       // Use explicit isAnchor flag if provided, otherwise default to false
       const isAnchor = sn.isAnchor ?? false;
-      this.nodes.set(
-        sn.id,
-        new MeshNode(
+      
+      // Check if this should be a malicious node (detect by label prefix)
+      const isMalicious = sn.label?.startsWith("[MAL]") ?? false;
+      
+      if (isMalicious) {
+        this.nodes.set(
           sn.id,
-          sn.lat,
-          sn.lng,
-          sn.label ?? `Node ${sn.id}`,
-          isAnchor,
-        ),
-      );
+          new MaliciousNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+            "jammer", // default strategy
+          ),
+        );
+      } else {
+        this.nodes.set(
+          sn.id,
+          new MeshNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+          ),
+        );
+      }
     }
   }
 
@@ -73,6 +85,9 @@ export class MeshSimulator {
   /** Advance simulation by one tick. Returns full state snapshot. */
   step(): SimState {
     this.tick++;
+
+    // Start new environment tick
+    this.environment.startTick();
 
     // Reset visual states
     for (const node of this.nodes.values()) {
@@ -84,100 +99,157 @@ export class MeshSimulator {
     // Here we simulate by providing true distances + noise
     this.performFtmRangingPhase();
 
-    // 1. Each node runs its internal tick (beacon timers, expiry, trilateration)
+    // 1. Each node runs its loop (beacon timers, expiry, trilateration, attacks)
     for (const node of this.nodes.values()) {
-      node.tick(this.tick);
+      // Pass the trusted-only routing flag to each node
+      node.setTrustedOnlyRouting(this.trustedOnlyRouting);
+      node.loop(this.tick);
     }
 
     // 2. Process TX queues — one packet per node per tick (half-duplex)
-    const packetsInAir: AirPacket[] = [];
+    const senderByPacketId = new Map<string, MeshNode>();
+    const packetById = new Map<string, MeshPacket>();
+    const heardByPacketId = new Map<string, boolean>();
+
     for (const node of this.nodes.values()) {
       const pkt = node.txQueue.shift();
-      if (pkt) {
-        node.state = "tx";
-        packetsInAir.push({ sender: node, packet: pkt });
-        this.totalSent++;
-      }
-    }
+      if (!pkt) continue;
 
-    // 3. Build per-receiver contention map for this tick.
-    // If multiple packets arrive at a receiver in the same tick, we model
-    // LoRa channel contention + capture effect.
-    const receptionMap = new Map<number, ReceptionCandidate[]>();
-    for (const air of packetsInAir) {
-      const { sender, packet } = air;
-      let heardByAnyReceiver = false;
+      node.state = "tx";
+      this.totalSent++;
 
-      for (const receiver of this.nodes.values()) {
-        if (receiver.id === sender.id) continue;
-        if (receiver.state === "tx") continue; // cannot RX while TX
+      const accepted = this.environment.transmit(
+        pkt,
+        node.id,
+        node.trueLat,
+        node.trueLng,
+        node.loraChannel,
+      );
 
-        // Use TRUE positions for physics (radio propagation)
-        const dist = haversine(
-          sender.trueLat,
-          sender.trueLng,
-          receiver.trueLat,
-          receiver.trueLng,
-        );
-        if (dist > RADIO_RANGE_M) continue;
-
-        // RSSI model: simple log-distance path loss
-        const rssi = -40 - 20 * Math.log10(Math.max(dist, 1));
-        heardByAnyReceiver = true;
-
-        const list = receptionMap.get(receiver.id) ?? [];
-        list.push({ sender, receiver, packet, rssi });
-        receptionMap.set(receiver.id, list);
-      }
-
-      this.logPacketSend(sender, packet);
-
-      // No one in range -> drop (for data/ack payload traffic)
-      if (
-        !heardByAnyReceiver &&
-        (packet.type === PacketType.DATA || packet.type === PacketType.ACK)
-      ) {
-        this.totalDropped++;
-        this.log(
-          `✗ Packet from ${sender.label} lost (no receivers in range)`,
-          "warn",
-        );
-      }
-    }
-
-    // 4. Resolve each receiver's on-air contention.
-    for (const candidates of receptionMap.values()) {
-      if (candidates.length === 1) {
-        this.deliverCandidate(candidates[0], "ok");
-        continue;
-      }
-
-      // Multiple same-tick arrivals at one receiver => contention.
-      // Capture effect: strongest packet may still decode if it exceeds
-      // the second strongest by CAPTURE_THRESHOLD_DB.
-      const sorted = [...candidates].sort((a, b) => b.rssi - a.rssi);
-      const strongest = sorted[0];
-      const second = sorted[1];
-      const margin = strongest.rssi - second.rssi;
-
-      this.totalCollisions++;
-
-      if (margin >= CAPTURE_THRESHOLD_DB) {
-        this.log(
-          `⚡ Capture at ${strongest.receiver.label}: ${sorted.length} simultaneous packets, strongest won by ${margin.toFixed(1)} dB`,
-          "warn",
-        );
-        this.deliverCandidate(strongest, "captured");
-        for (let i = 1; i < sorted.length; i++) {
-          this.dropCandidateByCollision(sorted[i]);
-        }
+      if (accepted) {
+        this.logPacketSend(node, pkt);
+        senderByPacketId.set(pkt.id, node);
+        packetById.set(pkt.id, pkt);
+        heardByPacketId.set(pkt.id, false);
       } else {
-        this.log(
-          `✗ Collision at ${strongest.receiver.label}: ${sorted.length} simultaneous packets`,
-          "warn",
-        );
-        for (const candidate of sorted) {
-          this.dropCandidateByCollision(candidate);
+        if (pkt.type === PacketType.DATA || pkt.type === PacketType.ACK) {
+          this.totalDropped++;
+          this.log(
+            `✗ Packet from ${node.label} jammed at source`,
+            "warn",
+          );
+        }
+        node.recordTransmissionResult(pkt.id, "jammed");
+      }
+    }
+
+    // 3. Continuous listening: every node attempts to receive each tick.
+    for (const receiver of this.nodes.values()) {
+      if (receiver.state === "tx") continue; // cannot RX while TX
+
+      const results = this.environment.receive(
+        receiver.id,
+        receiver.trueLat,
+        receiver.trueLng,
+        receiver.loraChannel,
+      );
+
+      if (results.length === 0) continue;
+
+      const hasDecodable = results.some(
+        (r) => r.status === "ok" || r.status === "captured",
+      );
+      if (hasDecodable) receiver.state = "rx";
+
+      for (const result of results) {
+        const sender = senderByPacketId.get(result.packet.id);
+        if (!sender) continue;
+
+        heardByPacketId.set(result.packet.id, true);
+
+        this.transmissions.push({
+          fromLat: sender.trueLat,
+          fromLng: sender.trueLng,
+          toLat: receiver.trueLat,
+          toLng: receiver.trueLng,
+          packetType: result.packet.type,
+          status: result.status,
+          createdTick: this.tick,
+          channel: result.channel,
+          isMalicious: sender instanceof MaliciousNode,
+          radioType: result.packet.radioType,
+        });
+
+        sender.recordTransmissionResult(result.packet.id, result.status);
+
+        if (result.status === "collision") {
+          this.totalCollisions++;
+          if (
+            result.packet.type === PacketType.DATA ||
+            result.packet.type === PacketType.ACK
+          ) {
+            this.totalDropped++;
+            this.log(
+              `✗ Collision drop: ${sender.label} → ${receiver.label}`,
+              "warn",
+            );
+          }
+          continue;
+        }
+
+        if (result.status === "jammed") {
+          if (
+            result.packet.type === PacketType.DATA ||
+            result.packet.type === PacketType.ACK
+          ) {
+            this.totalDropped++;
+            this.log(
+              `✗ Jammed: ${sender.label} → ${receiver.label}`,
+              "warn",
+            );
+          }
+          continue;
+        }
+
+        const response = receiver.receive(result.packet, result.rssi, this.tick);
+        if (!response) continue;
+
+        receiver.txQueue.push(response);
+
+        if (response.type === PacketType.ACK) {
+          this.totalDelivered++;
+          this.hopAccumulator += result.packet.hopCount;
+          this.deliveryCount++;
+
+          const trkMatch = result.packet.payload.match(/\[trk:([^\]]+)\]/);
+          if (trkMatch) {
+            this.deliveredTrackingIds.add(trkMatch[1]);
+          }
+
+          this.log(
+            `✓ Delivered to ${receiver.label} from Node ${result.packet.sourceId} (${result.packet.hopCount} hops)`,
+            "success",
+          );
+        } else if (response.type === PacketType.DATA) {
+          this.log(
+            `↳ ${receiver.label} forwarding to next hop (hop ${response.hopCount})`,
+            "info",
+          );
+        }
+      }
+    }
+
+    // 4. Any accepted packet with no listeners becomes a drop.
+    for (const [packetId, packet] of packetById.entries()) {
+      if (heardByPacketId.get(packetId)) continue;
+      if (packet.type === PacketType.DATA || packet.type === PacketType.ACK) {
+        const sender = senderByPacketId.get(packetId);
+        if (sender) {
+          this.totalDropped++;
+          this.log(
+            `✗ Packet from ${sender.label} lost (no receivers in range)`,
+            "warn",
+          );
         }
       }
     }
@@ -218,19 +290,38 @@ export class MeshSimulator {
 
   reset(sensorNodes: SensorNode[]): void {
     this.nodes.clear();
+    this.environment = new Environment(); // Reset environment
+    
     for (const sn of sensorNodes) {
       const isAnchor = sn.isAnchor ?? false;
-      this.nodes.set(
-        sn.id,
-        new MeshNode(
+      const isMalicious = sn.label?.startsWith("[MAL]") ?? false;
+      
+      if (isMalicious) {
+        this.nodes.set(
           sn.id,
-          sn.lat,
-          sn.lng,
-          sn.label ?? `Node ${sn.id}`,
-          isAnchor,
-        ),
-      );
+          new MaliciousNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+            "jammer",
+          ),
+        );
+      } else {
+        this.nodes.set(
+          sn.id,
+          new MeshNode(
+            sn.id,
+            sn.lat,
+            sn.lng,
+            sn.label ?? `Node ${sn.id}`,
+            isAnchor,
+          ),
+        );
+      }
     }
+    
     this.tick = 0;
     this.transmissions = [];
     this.events = [];
@@ -260,6 +351,18 @@ export class MeshSimulator {
         discoveredLabels[nid] = entry.label;
       }
 
+      // Build bandit stats for visualization
+      const banditAllStats = node.bandit.getAllStats();
+      const banditStats: Record<string, { successCount: number; failureCount: number; totalAttempts: number; successRate: number }> = {};
+      for (const [key, stats] of Object.entries(banditAllStats)) {
+        banditStats[key] = {
+          successCount: stats.successCount,
+          failureCount: stats.failureCount,
+          totalAttempts: stats.totalAttempts,
+          successRate: stats.successRate,
+        };
+      }
+
       nodeStates.push({
         id: node.id,
         trueLat: node.trueLat,
@@ -271,7 +374,10 @@ export class MeshSimulator {
         neighborCount: node.directNeighborCount,
         knownNodes: node.knownNodeCount,
         label: node.label,
+        trustedPeers: [...node.storage.trustedPeers.keys()],
         discoveredLabels,
+        receivedMessages: [...node.receivedMessages],
+        banditStats: Object.keys(banditStats).length > 0 ? banditStats : undefined,
       });
     }
 
@@ -347,11 +453,12 @@ export class MeshSimulator {
   }
 
   private logPacketSend(sender: MeshNode, packet: MeshPacket): void {
-    if (packet.type === PacketType.HEARTBEAT) {
+    // Check if this is a gossip heartbeat message
+    if (packet.type === PacketType.DATA && packet.payload.startsWith("[GOSSIP]")) {
       if (this.tick % 10 === 0) {
         // Don't spam heartbeat logs — show every 10th tick.
         this.log(
-          `📡 ${sender.label} heartbeat (${packet.gossipEntries.length} gossip entries)`,
+          `📡 ${sender.label} heartbeat message sent`,
           "info",
         );
       }
@@ -368,70 +475,157 @@ export class MeshSimulator {
     }
   }
 
-  private deliverCandidate(
-    candidate: ReceptionCandidate,
-    status: Transmission["status"],
-  ): void {
-    const { sender, receiver, packet, rssi } = candidate;
-    receiver.state = "rx";
+  /* ── New API: Trust Management ──────────────────────── */
 
-    this.transmissions.push({
-      fromLat: sender.trueLat,
-      fromLng: sender.trueLng,
-      toLat: receiver.trueLat,
-      toLng: receiver.trueLng,
-      packetType: packet.type,
-      status,
-      createdTick: this.tick,
-    });
+  /**
+   * Establish trust between two nodes (bidirectional).
+   */
+  establishTrust(nodeId1: number, nodeId2: number): void {
+    const node1 = this.nodes.get(nodeId1);
+    const node2 = this.nodes.get(nodeId2);
+    
+    if (!node1 || !node2) return;
+    
+    // Exchange public keys
+    node1.trustPeer(nodeId2, node2.getPublicKey());
+    node2.trustPeer(nodeId1, node1.getPublicKey());
+    
+    this.log(
+      `🤝 Trust established between ${node1.label} and ${node2.label}`,
+      "info",
+    );
+  }
 
-    const response = receiver.receive(packet, rssi, this.tick);
-    if (!response) return;
+  /**
+   * Configure trust graph with specified density.
+   * @param nodeIds - Nodes to include in trust graph
+   * @param density - 0-1, percentage of possible connections to create
+   */
+  configureTrustGraph(nodeIds: number[], density: number): void {
+    const d = Math.max(0, Math.min(1, density));
 
-    receiver.txQueue.push(response);
-
-    if (response.type === PacketType.ACK) {
-      this.totalDelivered++;
-      this.hopAccumulator += packet.hopCount;
-      this.deliveryCount++;
-
-      // Extract tracking ID from payload for delivery confirmation
-      const trkMatch = packet.payload.match(/\[trk:([^\]]+)\]/);
-      if (trkMatch) {
-        this.deliveredTrackingIds.add(trkMatch[1]);
+    // Clear existing trust relationships
+    for (const nodeId of nodeIds) {
+      const node = this.nodes.get(nodeId);
+      if (node) node.clearTrustedPeers();
+    }
+    
+    // Generate all possible pairs
+    const allPairs: Array<[number, number]> = [];
+    for (let i = 0; i < nodeIds.length; i++) {
+      for (let j = i + 1; j < nodeIds.length; j++) {
+        allPairs.push([nodeIds[i], nodeIds[j]]);
       }
-
-      this.log(
-        `✓ Delivered to ${receiver.label} from Node ${packet.sourceId} (${packet.hopCount} hops)`,
-        "success",
-      );
-    } else if (response.type === PacketType.DATA) {
-      this.log(
-        `↳ ${receiver.label} forwarding to next hop (hop ${response.hopCount})`,
-        "info",
-      );
     }
+    
+    // Calculate exact number of connections to create
+    const targetConnections = Math.round(allPairs.length * d);
+    
+    // Shuffle pairs using Fisher-Yates algorithm
+    for (let i = allPairs.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [allPairs[i], allPairs[j]] = [allPairs[j], allPairs[i]];
+    }
+    
+    // Create exactly the target number of connections
+    let actualConnections = 0;
+    for (let i = 0; i < targetConnections && i < allPairs.length; i++) {
+      const [nodeId1, nodeId2] = allPairs[i];
+      this.establishTrust(nodeId1, nodeId2);
+      actualConnections++;
+    }
+    
+    const achievedDensity = allPairs.length > 0 
+      ? (actualConnections / allPairs.length) * 100 
+      : 0;
+    
+    this.log(
+      `🌐 Trust graph configured: ${actualConnections}/${allPairs.length} connections (${achievedDensity.toFixed(1)}% density)`,
+      "info",
+    );
   }
 
-  private dropCandidateByCollision(candidate: ReceptionCandidate): void {
-    const { sender, receiver, packet } = candidate;
+  /**
+   * Configure trust graph explicitly with a map of connections.
+   */
+  setTrustGraphFromMap(trustMap: Record<number, number[]>): void {
+    const nodeIds = Object.keys(trustMap).map((id) => Number(id));
+    const existingNodeIds = nodeIds.filter((id) => this.nodes.has(id));
 
-    this.transmissions.push({
-      fromLat: sender.trueLat,
-      fromLng: sender.trueLng,
-      toLat: receiver.trueLat,
-      toLng: receiver.trueLng,
-      packetType: packet.type,
-      status: "collision",
-      createdTick: this.tick,
-    });
-
-    if (packet.type === PacketType.DATA || packet.type === PacketType.ACK) {
-      this.totalDropped++;
-      this.log(
-        `✗ Collision drop: ${sender.label} → ${receiver.label}`,
-        "warn",
-      );
+    for (const nodeId of existingNodeIds) {
+      const node = this.nodes.get(nodeId);
+      if (node) node.clearTrustedPeers();
     }
+
+    let connectionCount = 0;
+    const seenPairs = new Set<string>();
+
+    for (const nodeId of existingNodeIds) {
+      const peers = trustMap[nodeId] ?? [];
+      for (const peerId of peers) {
+        if (!this.nodes.has(peerId)) continue;
+        const a = Math.min(nodeId, peerId);
+        const b = Math.max(nodeId, peerId);
+        const key = `${a}-${b}`;
+        if (a === b || seenPairs.has(key)) continue;
+        seenPairs.add(key);
+        this.establishTrust(a, b);
+        connectionCount++;
+      }
+    }
+
+    this.log(
+      `🔗 Trust graph updated: ${connectionCount} explicit connections`,
+      "info",
+    );
   }
-}
+
+  /**
+   * Get node instance (for direct access).
+   */
+  getNode(nodeId: number): MeshNode | undefined {
+    return this.nodes.get(nodeId);
+  }
+
+  /**
+   * Get environment (for UI access to spectrum, jammers, etc.).
+   */
+  getEnvironment(): Environment {
+    return this.environment;
+  }
+
+  /**
+   * Add a jammer to the environment.
+   */
+  addJammer(
+    lat: number,
+    lng: number,
+    radiusM: number,
+    powerDbm: number,
+    channels: number[],
+  ): void {
+    this.environment.addJammer(lat, lng, radiusM, powerDbm, channels);
+    this.log(
+      `🔇 Jammer deployed at (${lat.toFixed(4)}, ${lng.toFixed(4)})`,
+      "warn",
+    );
+  }
+
+  /**
+   * Clear all jammers.
+   */
+  clearJammers(): void {
+    this.environment.clearJammers();
+    this.log("Jammers cleared", "info");
+  }
+  /**
+   * Enable or disable trusted-only routing.
+   * When enabled, nodes only route through peers they trust.
+   */
+  setTrustedOnlyRouting(enabled: boolean): void {
+    this.trustedOnlyRouting = enabled;
+    this.log(
+      `🔒 Trusted-only routing: ${enabled ? "ENABLED" : "DISABLED"}`,
+      "info",
+    );
+  }}

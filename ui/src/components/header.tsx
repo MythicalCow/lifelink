@@ -1,6 +1,6 @@
 "use client";
 
-export type ViewMode = "map" | "messages" | "sensors";
+export type ViewMode = "map" | "sensors" | "nodes";
 
 interface HeaderProps {
   view: ViewMode;
@@ -26,30 +26,30 @@ export function Header({
       <div className="absolute left-1/2 -translate-x-1/2 flex h-8 items-center rounded-full bg-[var(--foreground)]/[0.06] p-0.5 backdrop-blur-sm">
         <button
           onClick={() => onViewChange("map")}
-          className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all duration-200 ${
+          className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
             view === "map"
               ? "bg-white text-[var(--foreground)] shadow-sm"
-              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
+              : "text-[var(--foreground)]/70 hover:text-[var(--foreground)]/80"
           }`}
         >
           Map
         </button>
         <button
-          onClick={() => onViewChange("messages")}
-          className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all duration-200 ${
-            view === "messages"
+          onClick={() => onViewChange("nodes")}
+          className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
+            view === "nodes"
               ? "bg-white text-[var(--foreground)] shadow-sm"
-              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
+              : "text-[var(--foreground)]/70 hover:text-[var(--foreground)]/80"
           }`}
         >
-          Messages
+          Nodes & Trust
         </button>
         <button
           onClick={() => onViewChange("sensors")}
-          className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all duration-200 ${
+          className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
             view === "sensors"
               ? "bg-white text-[var(--foreground)] shadow-sm"
-              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
+              : "text-[var(--foreground)]/70 hover:text-[var(--foreground)]/80"
           }`}
         >
           Setup
@@ -58,11 +58,11 @@ export function Header({
 
       {/* Status */}
       <nav className="flex items-center gap-5">
-        <span className="flex items-center gap-2 text-xs text-[var(--muted)]">
+        <span className="flex items-center gap-2 text-xs text-[var(--foreground)]/70">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
           {nodeCount} nodes
         </span>
-        <span className="flex items-center gap-2 text-xs text-[var(--muted)]/60">
+        <span className="flex items-center gap-2 text-xs text-[var(--foreground)]/60">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
           {anchorCount} anchors
         </span>

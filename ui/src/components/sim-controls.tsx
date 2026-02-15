@@ -33,7 +33,7 @@ export function SimControls({
         <span className="text-xs font-semibold tracking-wide text-[var(--foreground)]/70 uppercase">
           Mesh Simulation
         </span>
-        <span className="text-[10px] tabular-nums text-[var(--muted)]">
+        <span className="text-[10px] tabular-nums text-[var(--foreground)]/70">
           tick {state?.tick ?? 0}
         </span>
       </div>
@@ -60,7 +60,7 @@ export function SimControls({
         </button>
         <button
           onClick={onReset}
-          className="flex h-8 w-16 items-center justify-center rounded-lg bg-[var(--foreground)]/5 text-xs text-[var(--muted)] transition-colors hover:bg-[var(--foreground)]/10"
+          className="flex h-8 w-16 items-center justify-center rounded-lg bg-[var(--foreground)]/5 text-xs text-[var(--foreground)]/70 transition-colors hover:bg-[var(--foreground)]/10"
         >
           Reset
         </button>
@@ -74,22 +74,6 @@ export function SimControls({
           <Stat label="Dropped" value={stats.totalDropped} />
           <Stat label="Collisions" value={stats.totalCollisions} />
           <Stat label="Avg hops" value={stats.avgHops.toFixed(1)} />
-        </div>
-      )}
-
-      {/* Membership coverage bar */}
-      {stats && (
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] text-[var(--muted)]">Membership</span>
-          <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--foreground)]/[0.06]">
-            <div
-              className="absolute inset-y-0 left-0 rounded-full bg-[var(--accent)] transition-all duration-500"
-              style={{ width: `${Math.round(stats.membershipCoverage * 100)}%` }}
-            />
-          </div>
-          <span className="w-8 text-right text-[10px] tabular-nums text-[var(--muted)]">
-            {Math.round(stats.membershipCoverage * 100)}%
-          </span>
         </div>
       )}
 
@@ -127,7 +111,7 @@ function Stat({ label, value }: { label: string; value: string | number }) {
       <span className="text-sm font-semibold tabular-nums text-[var(--foreground)]">
         {value}
       </span>
-      <span className="text-[9px] text-[var(--muted)]">{label}</span>
+      <span className="text-[9px] text-[var(--foreground)]/70">{label}</span>
     </div>
   );
 }

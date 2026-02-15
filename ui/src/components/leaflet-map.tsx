@@ -9,30 +9,22 @@ import {
   Polyline,
   Tooltip,
 } from "react-leaflet";
-import type { SensorNode, SuggestedNode } from "@/types/sensor";
 import type { SimState, Transmission, NodeVisualState } from "@/simulation/types";
 import { PacketType } from "@/simulation/types";
 import "leaflet/dist/leaflet.css";
 
 interface LeafletMapProps {
-  nodes: SensorNode[];
   center: [number, number];
   zoom: number;
-  suggestions: SuggestedNode[];
   simState: SimState | null;
+  mapKey?: number;
+  showGodMode?: boolean;
 }
 
 /** Map node visual state → color */
 function nodeColor(ns: NodeVisualState | undefined): string {
-  if (!ns) return "#6b9e8a";
-  switch (ns.state) {
-    case "tx":
-      return "#4ade80"; // bright green
-    case "rx":
-      return "#60a5fa"; // blue
-    default:
-      return "#6b9e8a"; // sage
-  }
+  if (!ns) return "#2563eb";
+  return "#2563eb";
 }
 
 /** Map node state → border weight */
@@ -41,37 +33,65 @@ function nodeWeight(ns: NodeVisualState | undefined): number {
   return ns.state === "idle" ? 2 : 3;
 }
 
-/** Transmission line color by packet type / outcome */
-function txColor(tx: Transmission): string {
-  if (tx.status === "collision") return "#ef4444";
-  if (tx.status === "captured") return "#f59e0b";
+/** Transmission line color by channel (green -> yellow family) */
+function txColorByChannel(channel: number): string {
+  const colors = [
+    "#22c55e", // green - ch 0
+    "#4ade80", // lighter green - ch 1
+    "#84cc16", // lime - ch 2
+    "#a3e635", // lighter lime - ch 3
+    "#bef264", // yellow-green - ch 4
+    "#facc15", // yellow - ch 5
+    "#fde047", // lighter yellow - ch 6
+    "#fef08a", // pale yellow - ch 7
+  ];
+  return colors[channel % colors.length];
+}
 
-  switch (tx.packetType) {
-    case PacketType.HEARTBEAT:
-      return "#6b9e8a";
-    case PacketType.DATA:
-      return "#3b82f6";
-    case PacketType.ACK:
-      return "#4ade80";
+/** Transmission line color */
+function txColor(tx: Transmission): string {
+  // Special statuses first
+  if (tx.status === "collision") return "#dc2626"; // darker red
+  if (tx.status === "captured") return "#f97316"; // orange
+  if (tx.status === "jammed") return "#475569"; // slate
+  
+  // BLE vs LoRa coloring
+  if (tx.radioType === "BLE") {
+    return "#0ea5e9"; // bright cyan/blue
+  } else {
+    // LoRa uses green shades
+    // ACKs are lighter green, Data/Heartbeat messages are brighter green
+    if (tx.packetType === PacketType.ACK) {
+      return "#4ade80"; // lighter green for ACKs
+    } else {
+      return "#22c55e"; // bright green for DATA (includes heartbeats)
+    }
   }
 }
 
 function txOpacity(tx: Transmission): number {
-  if (tx.status === "collision") return 0.72;
+  if (tx.status === "collision") return 0.75;
   if (tx.status === "captured") return 0.8;
-  return tx.packetType === PacketType.HEARTBEAT ? 0.15 : 0.6;
+  if (tx.status === "jammed") return 0.65;
+  return 0.7;
 }
 
 function txWeight(tx: Transmission): number {
   if (tx.status === "collision") return 2.6;
   if (tx.status === "captured") return 2.8;
-  return tx.packetType === PacketType.HEARTBEAT ? 1 : 2.5;
+  if (tx.status === "jammed") return 2.4;
+  return 2.5;
 }
 
 function txDashArray(tx: Transmission): string | undefined {
+  // Malicious transmissions: dotted (short dashes)
+  if (tx.isMalicious) return "2 6";
+  // Status failures: all dotted
   if (tx.status === "collision") return "2 4";
-  if (tx.packetType === PacketType.HEARTBEAT) return "3 4";
-  return undefined;
+  if (tx.status === "captured") return "2 4";
+  if (tx.status === "jammed") return "2 4";
+  // Normal transmissions: dashed
+  return "8 4";
 }
 
 /** Calculate position error in meters */
@@ -88,36 +108,110 @@ function positionError(ns: NodeVisualState): number {
 }
 
 export function LeafletMap({
-  nodes,
   center,
   zoom,
-  suggestions,
   simState,
+  mapKey = 0,
+  showGodMode = false,
 }: LeafletMapProps) {
-  const [showGodMode, setShowGodMode] = useState(false);
-  const hasSimulation = Boolean(simState);
+  const [showLegend, setShowLegend] = useState(true);
   const transmissions = simState?.transmissions ?? [];
   const nodeStates = simState?.nodeStates ?? [];
 
   return (
     <>
-      {/* God mode toggle */}
-      {hasSimulation && (
-        <div className="absolute top-20 right-4 z-[1000]">
-          <button
-            onClick={() => setShowGodMode(!showGodMode)}
-            className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
-              showGodMode
-                ? "bg-amber-500/90 text-white"
-                : "bg-white/80 text-[var(--muted)] hover:bg-white"
-            }`}
-          >
-            {showGodMode ? "👁 True Positions" : "📡 Estimated"}
-          </button>
+      {/* Legend */}
+      {showLegend && (
+        <div className="absolute top-20 left-4 z-[1000] w-72 rounded-xl bg-white/90 p-4 shadow-lg backdrop-blur-sm">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-semibold text-[var(--foreground)]">Transmission Legend</span>
+            <button
+              onClick={() => setShowLegend(false)}
+              className="text-[var(--foreground)]/70 hover:text-[var(--foreground)] text-xs"
+            >
+              ✕
+            </button>
+          </div>
+          
+          <div className="space-y-3">
+            {/* Radio Types */}
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Radio Types</p>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div 
+                    className="w-6 h-1 rounded-full" 
+                    style={{ backgroundColor: "#0ea5e9", opacity: 0.7 }}
+                  />
+                  <span className="text-[10px] text-[var(--foreground)]">BLE (short range)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div 
+                    className="w-6 h-1 rounded-full" 
+                    style={{ backgroundColor: "#22c55e", opacity: 0.7 }}
+                  />
+                  <span className="text-[10px] text-[var(--foreground)]">LoRa (long range)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg width="24" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="24" y2="4" stroke="#6b7280" strokeWidth="1.5" strokeDasharray="4 8" opacity="0.25" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Trust connections</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Packet Types */}
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Packet Types</p>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="text-[8px] font-bold text-[var(--muted)]">━━━</div>
+                  <span className="text-[10px] text-[var(--foreground)]">Data/Heartbeat/ACK</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Status */}
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-[var(--muted)] uppercase tracking-wide">Status</p>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#dc2626" strokeWidth="1.5" strokeDasharray="2 4" opacity="0.75" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Collision</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#f97316" strokeWidth="1.5" strokeDasharray="2 4" opacity="0.8" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Captured</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="32" y2="4" stroke="#475569" strokeWidth="1.5" strokeDasharray="2 4" opacity="0.65" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Jammed</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
+      {/* Toggle legend button (when hidden) */}
+      {!showLegend && (
+        <button
+          onClick={() => setShowLegend(true)}
+          className="absolute top-20 left-4 z-[1000] rounded-lg bg-white/80 px-3 py-1.5 text-[10px] font-medium text-[var(--muted)] shadow-sm backdrop-blur-sm transition-colors hover:bg-white"
+        >
+          Show Legend
+        </button>
+      )}
+
       <MapContainer
+        key={`map-${mapKey}`}
         center={center}
         zoom={zoom}
         minZoom={13}
@@ -133,7 +227,7 @@ export function LeafletMap({
         />
 
         {/* Transmission lines (always use true positions for physics) */}
-        {hasSimulation && transmissions.map((tx, i) => (
+        {transmissions.map((tx, i) => (
           <Polyline
             key={`tx-${tx.createdTick}-${i}`}
             positions={[
@@ -149,9 +243,46 @@ export function LeafletMap({
           />
         ))}
 
+        {/* Trust relationship lines (gray lines connecting trusted nodes) */}
+        {(() => {
+          const drawnConnections = new Set<string>();
+          return nodeStates.flatMap((ns) => {
+            if (!ns.trustedPeers || ns.trustedPeers.length === 0) return [];
+            
+            return ns.trustedPeers.map((peerId) => {
+              // Create a unique key for this connection (sorted to avoid duplicates)
+              const connectionKey = [ns.id, peerId].sort((a, b) => a - b).join('-');
+              
+              // Skip if we've already drawn this connection
+              if (drawnConnections.has(connectionKey)) return null;
+              drawnConnections.add(connectionKey);
+              
+              // Find peer node
+              const peer = nodeStates.find((n) => n.id === peerId);
+              if (!peer) return null;
+              
+              // Use true positions for trust lines
+              return (
+                <Polyline
+                  key={`trust-${connectionKey}`}
+                  positions={[
+                    [ns.trueLat, ns.trueLng],
+                    [peer.trueLat, peer.trueLng],
+                  ]}
+                  pathOptions={{
+                    color: "#6b7280",
+                    weight: 1.5,
+                    opacity: 0.25,
+                    dashArray: "4 8",
+                  }}
+                />
+              );
+            }).filter(Boolean);
+          });
+        })()}()
+
         {/* Error lines: connect true → estimated position (god mode only) */}
-        {hasSimulation &&
-          showGodMode &&
+        {showGodMode &&
           nodeStates
             .filter((ns) => ns.posConfidence > 0 && ns.posConfidence < 1)
             .map((ns) => (
@@ -171,8 +302,7 @@ export function LeafletMap({
             ))}
 
         {/* True position markers (god mode only — faded) */}
-        {hasSimulation &&
-          showGodMode &&
+        {showGodMode &&
           nodeStates.map((ns) => (
             <CircleMarker
               key={`true-${ns.id}`}
@@ -197,7 +327,7 @@ export function LeafletMap({
           ))}
 
         {/* Main node markers — show at ESTIMATED position (or true for anchors/unknown) */}
-        {hasSimulation && nodeStates.map((ns) => {
+        {nodeStates.map((ns) => {
           const color = nodeColor(ns);
           const weight = nodeWeight(ns);
           const isAnchor = ns.posConfidence === 1;
@@ -217,12 +347,12 @@ export function LeafletMap({
               center={[lat, lng]}
               radius={7}
               pathOptions={{
-                color: hasPosition ? color : "#9ca3af",
+                color,
                 weight,
-                opacity: hasPosition ? 0.9 : 0.4,
-                fillColor: isAnchor ? color : "transparent",
-                fillOpacity: isAnchor ? 0.3 : 0,
-                dashArray: hasPosition ? undefined : "3 3",
+                opacity: hasPosition ? 0.9 : 0.6,
+                fillColor: "transparent",
+                fillOpacity: 0,
+                dashArray: "1 5",
               }}
             >
               <Tooltip
@@ -249,52 +379,8 @@ export function LeafletMap({
           );
         })}
 
-        {!hasSimulation &&
-          nodes.map((node) => {
-            const isAnchor = node.isAnchor ?? false;
-            const hasLocation = node.locationKnown !== false;
-            const color = hasLocation ? (isAnchor ? "#d97706" : "#6b9e8a") : "#9ca3af";
-            return (
-              <CircleMarker
-                key={`node-static-${node.id}`}
-                center={[node.lat, node.lng]}
-                radius={7}
-                pathOptions={{
-                  color,
-                  weight: 2,
-                  opacity: hasLocation ? 0.9 : 0.5,
-                  fillColor: hasLocation && isAnchor ? color : "transparent",
-                  fillOpacity: hasLocation && isAnchor ? 0.3 : 0,
-                  dashArray: hasLocation ? undefined : "3 3",
-                }}
-              >
-                <Tooltip
-                  direction="top"
-                  offset={[0, -10]}
-                  className="lifelink-tooltip"
-                >
-                  <span className="font-semibold">
-                    {node.label || `Node ${node.id}`}
-                    {hasLocation && isAnchor && " 📍"}
-                  </span>
-                  {node.hardwareIdHex && (
-                    <span className="block opacity-50 text-[10px]">
-                      0x{node.hardwareIdHex}
-                    </span>
-                  )}
-                  {!hasLocation && (
-                    <span className="block opacity-60 text-[10px]">
-                      Mesh discovered (location unknown)
-                    </span>
-                  )}
-                </Tooltip>
-              </CircleMarker>
-            );
-          })}
-
         {/* Coverage perimeters (centered on estimated positions) */}
-        {hasSimulation &&
-          nodeStates
+        {nodeStates
           .filter((ns) => ns.posConfidence > 0)
           .map((ns) => {
             const isAnchor = ns.posConfidence === 1;
@@ -316,49 +402,6 @@ export function LeafletMap({
               />
             );
           })}
-
-        {!hasSimulation &&
-          nodes
-            .filter((node) => node.locationKnown !== false)
-            .map((node) => (
-              <Circle
-                key={`perimeter-static-${node.id}`}
-                center={[node.lat, node.lng]}
-                radius={node.radius ?? 170}
-                pathOptions={{
-                  color: node.isAnchor ? "#d97706" : "#6b9e8a",
-                  weight: 1,
-                  opacity: 0.15,
-                  fillColor: node.isAnchor ? "#d97706" : "#6b9e8a",
-                  fillOpacity: 0.03,
-                }}
-              />
-            ))}
-
-        {/* Suggested nodes */}
-        {suggestions.map((node) => (
-          <CircleMarker
-            key={`suggest-${node.id}`}
-            center={[node.lat, node.lng]}
-            radius={7}
-            pathOptions={{
-              color: "#d4956a",
-              weight: 1.5,
-              opacity: 0.5,
-              dashArray: "4 3",
-              fillColor: "#d4956a",
-              fillOpacity: 0.04,
-            }}
-          >
-            <Tooltip
-              direction="top"
-              offset={[0, -10]}
-              className="lifelink-tooltip"
-            >
-              {node.reason}
-            </Tooltip>
-          </CircleMarker>
-        ))}
       </MapContainer>
     </>
   );

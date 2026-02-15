@@ -5,6 +5,9 @@
 /** LoRa radio range in meters (campus w/ buildings) */
 export const RADIO_RANGE_M = 450;
 
+/** BLE radio range in meters (short range, line of sight typically) */
+export const BLE_RANGE_M = 100;
+
 /** FTM (802.11mc) ranging distance in meters.
  *  Real hardware: ~50m indoor, ~100m outdoor.
  *  Bumped for simulation demo. */
