@@ -142,7 +142,6 @@ export default function Home() {
           gatewayDevices={gateway.devices}
           gatewayMembers={gateway.members}
           gatewayLogs={gateway.logs}
-          gatewayMessageHistory={gateway.messageHistory}
           onGatewayScan={gateway.scan}
           onGatewayConnect={gateway.connect}
           onGatewayDisconnect={gateway.disconnect}

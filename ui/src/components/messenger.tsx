@@ -13,7 +13,6 @@ import type { SensorNode } from "@/types/sensor";
 import type {
   GatewayDevice,
   GatewayMember,
-  GatewayMessageHistory,
   GatewayState,
 } from "@/hooks/use-gateway-bridge";
 
@@ -40,7 +39,6 @@ interface MessengerProps {
   gatewayDevices: GatewayDevice[];
   gatewayMembers: GatewayMember[];
   gatewayLogs: string[];
-  gatewayMessageHistory: GatewayMessageHistory[];
   onGatewayScan: () => Promise<GatewayDevice[]>;
   onGatewayConnect: (address: string) => Promise<void>;
   onGatewayDisconnect: () => Promise<void>;
@@ -55,6 +53,33 @@ function nodeDisplayName(node: SensorNode): string {
   return node.label || node.hardwareIdHex || `Node ${node.id}`;
 }
 
+/* ── Inline spinner ── */
+function Spinner({ size = 24 }: { size?: number }) {
+  return (
+    <svg
+      className="animate-spin"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="3"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+      />
+    </svg>
+  );
+}
+
 export function Messenger({
   nodes,
   messages,
@@ -65,7 +90,6 @@ export function Messenger({
   gatewayDevices,
   gatewayMembers,
   gatewayLogs,
-  gatewayMessageHistory,
   onGatewayScan,
   onGatewayConnect,
   onGatewayDisconnect,
@@ -74,7 +98,7 @@ export function Messenger({
   const [selectedAddress, setSelectedAddress] = useState("");
   const [selectedReceiverHex, setSelectedReceiverHex] = useState("");
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [error, setError] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -109,90 +133,11 @@ export function Messenger({
     return `0x${hex}`;
   };
 
-  /* ── Merge hardware history → chat ──
-   *
-   * ingestedRef tracks which hardware history entries have already been
-   * merged into the chat. It must be reset whenever connectedSenderHex
-   * changes — INCLUDING when it transitions through "" and back to the
-   * same value (Bug 6: E504 → "" → E504 didn't clear, leaving an empty
-   * chat on reconnect to the same node).
-   *
-   * Fix: unconditionally reset on every connectedSenderHex change.
-   * No guards. No activeNodeRef equality check.
-   */
-  const ingestedRef = useRef(new Set<string>());
-
   // Reset on EVERY connectedSenderHex change — no guards, no skipping.
   useEffect(() => {
-    ingestedRef.current = new Set<string>();
     setMessages([]);
     setSelectedReceiverHex("");
   }, [connectedSenderHex, setMessages]);
-
-  // Ingest hardware message history into the chat list.
-  useEffect(() => {
-    if (!connectedSenderHex || gatewayMessageHistory.length === 0) return;
-
-    setMessages((prev) => {
-      let next = prev;
-      const now = Date.now();
-
-      for (const h of gatewayMessageHistory) {
-        const peerHex = h.peer.toUpperCase();
-        const isSent = h.direction === "S";
-        const key = `hw-${connectedSenderHex}-${h.direction}-${peerHex}-${h.msg_id}`;
-
-        if (ingestedRef.current.has(key)) continue;
-        ingestedRef.current.add(key);
-
-        const fromNodeId = isSent ? parseInt(connectedSenderHex, 16) : parseInt(peerHex, 16);
-        const toNodeId = isSent ? parseInt(peerHex, 16) : parseInt(connectedSenderHex, 16);
-
-        // Bug 4 fix: match optimistic sends on body text too, not just
-        // sender/receiver/time. Without this, two quick sends to the same
-        // peer get cross-matched and produce wrong vital/urgency metadata.
-        if (isSent) {
-          const optIdx = next.findIndex(
-            (m) =>
-              m.id.startsWith("msg-") &&
-              m.direction === "sent" &&
-              m.fromNodeId === fromNodeId &&
-              m.toNodeId === toNodeId &&
-              m.text === h.body &&
-              now - m.timestamp < 120_000,
-          );
-          if (optIdx >= 0) {
-            if (next === prev) next = [...prev];
-            next[optIdx] = {
-              ...next[optIdx],
-              id: key,
-              status: "sent",
-              vital: h.vital,
-              intent: h.intent,
-              urgency: h.urgency,
-            };
-            continue;
-          }
-        }
-
-        if (next.some((m) => m.id === key)) continue;
-        if (next === prev) next = [...prev];
-        next.push({
-          id: key,
-          fromNodeId,
-          toNodeId,
-          text: h.body,
-          timestamp: now,
-          direction: isSent ? "sent" : "received",
-          status: "sent",
-          vital: h.vital,
-          intent: h.intent,
-          urgency: h.urgency,
-        });
-      }
-      return next;
-    });
-  }, [gatewayMessageHistory, connectedSenderHex, setMessages]);
 
   // Auto-scroll
   useEffect(() => {
@@ -206,11 +151,68 @@ export function Messenger({
       connectedSenderHex &&
       selectedReceiverHex &&
       draft.trim() &&
-      !busy,
+      !busyLabel,
   );
 
   /* ── Handlers ── */
+  const handleRefreshMessages = async () => {
+    setBusyLabel("Refreshing messages…");
+    setError("");
+    try {
+      const res = await fetch("http://127.0.0.1:8765/messages?limit=60", {
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      const data: {
+        messages: {
+          idx: number;
+          direction: string;
+          peer: string;
+          msg_id: number;
+          vital: boolean;
+          intent: string;
+          urgency: number;
+          body: string;
+        }[];
+      } = await res.json();
+      console.log("Refresh Messages response:", data);
+
+      if (!connectedSenderHex || !data.messages || data.messages.length === 0) return;
+
+      const now = Date.now();
+
+      const refreshed: ChatMessage[] = data.messages.map((h) => {
+        const peerHex = h.peer.toUpperCase();
+        const isSent = h.direction === "S";
+        const key = `hw-${connectedSenderHex}-${h.direction}-${peerHex}-${h.msg_id}`;
+        const fromNodeId = isSent ? parseInt(connectedSenderHex, 16) : parseInt(peerHex, 16);
+        const toNodeId = isSent ? parseInt(peerHex, 16) : parseInt(connectedSenderHex, 16);
+        return {
+          id: key,
+          fromNodeId,
+          toNodeId,
+          text: h.body,
+          timestamp: now,
+          direction: isSent ? ("sent" as const) : ("received" as const),
+          status: "sent" as const,
+          vital: h.vital,
+          intent: h.intent,
+          urgency: h.urgency,
+        };
+      });
+
+      setMessages(refreshed);
+    } catch (err) {
+      setError(String(err));
+      console.error("Failed to refresh messages:", err);
+    } finally {
+      setBusyLabel(null);
+    }
+  };
+
   const handleScan = async () => {
+    setBusyLabel("Scanning for devices…");
     setError("");
     try {
       const found = await onGatewayScan();
@@ -219,13 +221,15 @@ export function Messenger({
       }
     } catch (err) {
       setError(String(err));
+    } finally {
+      setBusyLabel(null);
     }
   };
 
   const handleConnect = async (address?: string) => {
     const target = address || selectedAddress;
     if (!target) return;
-    setBusy(true);
+    setBusyLabel("Connecting…");
     setError("");
     try {
       await onGatewayConnect(target);
@@ -233,7 +237,19 @@ export function Messenger({
     } catch (err) {
       setError(String(err));
     } finally {
-      setBusy(false);
+      setBusyLabel(null);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setBusyLabel("Disconnecting…");
+    setError("");
+    try {
+      await onGatewayDisconnect();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusyLabel(null);
     }
   };
 
@@ -257,7 +273,7 @@ export function Messenger({
       },
     ]);
     setDraft("");
-    setBusy(true);
+    setBusyLabel("Sending…");
     setError("");
 
     try {
@@ -273,13 +289,23 @@ export function Messenger({
       );
       setError(String(err));
     } finally {
-      setBusy(false);
+      setBusyLabel(null);
     }
   };
 
   /* ── Render ── */
   return (
     <div className="absolute inset-0 top-16 bottom-10 z-[500] flex flex-col">
+      {/* ── Loading overlay ── */}
+      {busyLabel && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-xl bg-white/70 backdrop-blur-sm">
+          <Spinner size={32} />
+          <span className="text-sm font-medium text-[var(--foreground)]">
+            {busyLabel}
+          </span>
+        </div>
+      )}
+
       {/* ── Connection / Receiver bar ── */}
       <div className="mx-auto w-full max-w-3xl px-4 py-3">
         <div className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
@@ -289,13 +315,22 @@ export function Messenger({
                 ? `Connected · ${gatewayState.node_name || `0x${connectedSenderHex}`}`
                 : "Not connected"}
             </div>
-            <button
-              onClick={handleScan}
-              disabled={!gatewayOnline || busy}
-              className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] disabled:opacity-40"
-            >
-              Scan
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void handleRefreshMessages()}
+                disabled={!!busyLabel}
+                className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
+              >
+                Refresh Messages
+              </button>
+              <button
+                onClick={() => void handleScan()}
+                disabled={!!busyLabel}
+                className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
+              >
+                Scan
+              </button>
+            </div>
           </div>
 
           <div className="text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
@@ -310,15 +345,15 @@ export function Messenger({
               return (
                 <button
                   key={`from-${d.address}`}
-                  disabled={!gatewayOnline || busy}
+                  disabled={!!busyLabel}
                   onClick={() => {
                     if (isActive) {
-                      void onGatewayDisconnect();
+                      void handleDisconnect();
                       return;
                     }
                     void handleConnect(d.address);
                   }}
-                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition-colors disabled:opacity-40 ${
+                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
                     isActive
                       ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30"
                       : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
@@ -344,8 +379,9 @@ export function Messenger({
               return (
                 <button
                   key={`to-${hex}`}
+                  disabled={!!busyLabel}
                   onClick={() => setSelectedReceiverHex(hex)}
-                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition-colors ${
+                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
                     active
                       ? "bg-[var(--accent)] text-white ring-[var(--accent)]"
                       : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
@@ -445,13 +481,13 @@ export function Messenger({
                     : "Select a receiver above"
                   : "Connect a sender first"
               }
-              disabled={!gatewayState.connected || !selectedReceiverHex || busy}
-              className="h-10 flex-1 rounded-lg border border-[var(--foreground)]/[0.12] px-3 text-sm disabled:opacity-50"
+              disabled={!!busyLabel}
+              className="h-10 flex-1 rounded-lg border border-[var(--foreground)]/[0.12] px-3 text-sm disabled:pointer-events-none"
             />
             <button
-              onClick={handleSend}
+              onClick={() => void handleSend()}
               disabled={!canSend}
-              className="h-10 rounded-lg bg-[var(--accent)] px-4 text-sm font-semibold text-white disabled:opacity-40"
+              className="h-10 rounded-lg bg-[var(--accent)] px-4 text-sm font-semibold text-white transition active:scale-95 disabled:opacity-40"
             >
               Send
             </button>
