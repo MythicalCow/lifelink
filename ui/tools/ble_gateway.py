@@ -12,6 +12,8 @@ Runs a localhost HTTP API that the Next.js /bridge page can call:
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, asdict
@@ -22,6 +24,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+
+# Add repo root so we can import py_decision_tree
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from py_decision_tree.lib.train import main as train_triage_models
+from py_decision_tree.lib.infer import triage as run_triage
 
 
 NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -79,6 +86,13 @@ class BleGateway:
     self._recent_devices: dict[str, tuple[dict[str, Any], float]] = {}
     self._message_cache: dict[str, dict[int, dict[str, Any]]] = {}
     self._member_cache: list[dict[str, Any]] = []
+
+    # Train triage classifiers at startup
+    print("Training triage models...")
+    self._vital_clf, self._intent_clf, self._urg_clf = train_triage_models(
+        n_per_intent=250, n_normal=2000, seed=7,
+    )
+    print("Triage models ready.")
 
   def _log(self, line: str) -> None:
     ts = time.strftime("%H:%M:%S")
@@ -270,10 +284,17 @@ class BleGateway:
       await self._disconnect_inner_fast()
 
   async def send_command(self, command: str) -> None:
-    # SEND commands get the ACK-wait flow
+    # Triage SEND commands: classify text and send compact payload if vital
     if command.startswith("SEND|"):
-      await self._send_and_wait_for_ack(command)
-      return
+      parts = command.split("|", 2)
+      if len(parts) == 3:
+        peer, text = parts[1], parts[2]
+        is_vital, payload = run_triage(text, self._vital_clf, self._intent_clf, self._urg_clf)
+        if is_vital and payload:
+          self._log(f"TRIAGE: VITAL -> {payload}")
+          command = f"SEND|{peer}|{payload}"
+        else:
+          self._log(f"TRIAGE: normal chat, sending full text")
 
     expected_prefixes: tuple[str, ...] = ()
     timeout_s = BLE_TIMEOUT_NORMAL
@@ -284,6 +305,8 @@ class BleGateway:
       expected_prefixes = ("OK|STATUS|",)
     elif command.startswith("NAME|"):
       expected_prefixes = ("OK|NAME|",)
+    elif command.startswith("SEND|"):
+      expected_prefixes = ("OK|SEND|", "ERR|SEND|")
     elif command == "HISTCOUNT":
       expected_prefixes = ("OK|HISTCOUNT|",)
     elif command.startswith("HISTGET|"):
@@ -293,89 +316,6 @@ class BleGateway:
     elif command.startswith("MEMGET|"):
       expected_prefixes = ("OK|MEM|", "ERR|MEM|")
     await self._send_and_wait_locked(command, expected_prefixes, timeout=timeout_s, attempts=attempts)
-
-  async def _send_and_wait_for_ack(self, command: str) -> None:
-    """Send a SEND| command once, then briefly check if the peer's
-    <ACK> comes back.  The send itself is never retried — once the
-    device says OK|SEND|queued the message is on the mesh.  We just
-    poll once to see if an ACK arrived quickly."""
-    ACK_WAIT = 1.0  # total seconds to wait for ACK after send
-
-    # Send the message
-    self._log(f"SEND: {command}")
-    resp = await self._send_and_wait_locked(
-        command, ("OK|SEND|", "ERR|SEND|"),
-        timeout=BLE_TIMEOUT_NORMAL, attempts=2,
-    )
-    if resp.startswith("ERR|SEND|"):
-      self._log(f"SEND rejected: {resp}")
-      raise RuntimeError(resp)
-
-    self._log("Message queued on mesh, waiting for ACK...")
-
-    # Record histcount right after our send is queued
-    try:
-      resp = await self._send_and_wait_locked(
-          "HISTCOUNT", ("OK|HISTCOUNT|",),
-          timeout=BLE_TIMEOUT_NORMAL, attempts=2,
-      )
-      baseline = int(resp.split("|")[2])
-    except Exception:
-      self._log("Could not read HISTCOUNT, skipping ACK check")
-      return
-
-    # Wait, then check if any new *received* <ACK> appeared
-    await asyncio.sleep(ACK_WAIT)
-
-    try:
-      resp = await self._send_and_wait_locked(
-          "HISTCOUNT", ("OK|HISTCOUNT|",),
-          timeout=BLE_TIMEOUT_NORMAL, attempts=2,
-      )
-      new_count = int(resp.split("|")[2])
-    except Exception:
-      self._log("ACK check failed (HISTCOUNT error)")
-      return
-
-    if new_count <= baseline:
-      self._log(f"No new messages after send (histcount {baseline}), ACK may arrive later")
-      return
-
-    # Scan new entries for a received <ACK>
-    for idx in range(baseline, new_count):
-      try:
-        r = await self._send_and_wait_locked(
-            f"HISTGET|{idx}", ("OK|HIST|",),
-            timeout=BLE_TIMEOUT_FAST, attempts=3,
-        )
-        row = r.split("|")
-        if len(row) < 10:
-          continue
-        direction = row[3]
-        hex_body = row[9]
-        try:
-          body = bytes.fromhex(hex_body).decode("utf-8", errors="replace")
-        except ValueError:
-          body = ""
-
-        # Cache every new entry we see
-        addr = self._state.ble_address
-        cache = self._message_cache.get(addr, {})
-        cache[idx] = {
-            "idx": int(row[2]), "direction": direction,
-            "peer": row[4].upper(), "msg_id": int(row[5]),
-            "vital": row[6] == "1", "intent": row[7],
-            "urgency": int(row[8]), "body": body,
-        }
-        self._message_cache[addr] = cache
-
-        if direction == "R" and body.startswith("<ACK>"):
-          self._log(f"ACK received: \"{body}\"")
-          return
-      except Exception:
-        pass
-
-    self._log(f"No ACK yet ({new_count - baseline} new message(s) were our own sends), ACK may arrive later")
 
   async def fetch_messages(self) -> list[dict[str, Any]]:
     WINDOW = 5  # only keep track of the last N messages
