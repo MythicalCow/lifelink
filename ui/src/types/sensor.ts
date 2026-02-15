@@ -17,6 +17,8 @@ export interface SensorNode {
   hardwareIdHex?: string;
   /** BLE address used during setup/connect */
   bleAddress?: string;
+  /** True when coordinates are user-configured; false for mesh-discovered placeholder location */
+  locationKnown?: boolean;
 }
 
 export interface SuggestedNode {

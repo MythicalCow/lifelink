@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { Header, type ViewMode } from "@/components/header";
 import { SensorField } from "@/components/sensor-field";
 import { Messenger, type ChatMessage } from "@/components/messenger";
@@ -49,6 +49,7 @@ export default function Home() {
         isAnchor: config.isAnchor,
         hardwareIdHex: config.hardwareIdHex.toUpperCase(),
         bleAddress: config.bleAddress,
+        locationKnown: true,
       };
 
       if (existingIdx >= 0) {
@@ -59,6 +60,51 @@ export default function Home() {
       return [...prev, nextNode];
     });
   }, []);
+
+  useEffect(() => {
+    if (gateway.members.length === 0) return;
+    setNodes((prev) => {
+      let changed = false;
+      const next = [...prev];
+      for (const member of gateway.members) {
+        const hex = (member.node_id || "").toUpperCase();
+        if (!hex) continue;
+        const idx = next.findIndex(
+          (n) => (n.hardwareIdHex || "").toUpperCase() === hex,
+        );
+        const memberLabel =
+          member.name && member.name !== "unknown" ? member.name : `Node-${hex}`;
+        if (idx >= 0) {
+          const cur = next[idx];
+          const isGenericLabel =
+            !cur.label ||
+            cur.label.startsWith("Node-") ||
+            cur.label.startsWith("Node ");
+          if (member.name && member.name !== "unknown" && isGenericLabel && cur.label !== member.name) {
+            next[idx] = { ...cur, label: member.name };
+            changed = true;
+          }
+          continue;
+        }
+
+        const hash = parseInt(hex, 16) || 0;
+        const angle = ((hash % 360) * Math.PI) / 180;
+        const ring = 0.00035 + ((hash >> 4) % 5) * 0.00005;
+        next.push({
+          id: nextNodeId.current++,
+          lat: MAP_CENTER[0] + Math.sin(angle) * ring,
+          lng: MAP_CENTER[1] + Math.cos(angle) * ring,
+          radius: 170,
+          label: memberLabel,
+          isAnchor: false,
+          hardwareIdHex: hex,
+          locationKnown: false,
+        });
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [gateway.members]);
 
   /* ── Derived counts ── */
   const anchorCount = nodes.filter((n) => n.isAnchor).length;

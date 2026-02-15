@@ -1,5 +1,6 @@
 #include "lifelink_lora_node.h"
 #include "lifelink_bluetooth.h"
+#include "lifelink_display.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -7,6 +8,7 @@
 namespace {
 LifeLinkLoRaNode g_lora_node;
 LifeLinkBluetooth g_bluetooth;
+LifeLinkDisplay g_display;
 
 void hexEncode(const char* in, char* out, size_t out_size) {
   static const char* kHex = "0123456789ABCDEF";
@@ -92,6 +94,47 @@ void onBluetoothMessage(const char* msg, size_t len) {
     return;
   }
 
+  if (strncmp(cmd, "MEMCOUNT", 8) == 0) {
+    char out[48];
+    snprintf(out, sizeof(out), "OK|MEMCOUNT|%u", static_cast<unsigned>(g_lora_node.activeMemberCount()));
+    g_bluetooth.sendText(out);
+    return;
+  }
+
+  if (strncmp(cmd, "MEMGET|", 7) == 0) {
+    const uint16_t idx = static_cast<uint16_t>(strtoul(cmd + 7, nullptr, 10));
+    LifeLinkLoRaNode::MemberSnapshot member{};
+    if (!g_lora_node.getActiveMember(idx, &member)) {
+      g_bluetooth.sendText("ERR|MEM|range");
+      return;
+    }
+    char name_safe[sizeof(member.name)];
+    size_t j = 0;
+    for (size_t i = 0; member.name[i] != '\0' && j + 1 < sizeof(name_safe); ++i) {
+      char c = member.name[i];
+      if (c == '|') {
+        c = '_';
+      }
+      name_safe[j++] = c;
+    }
+    name_safe[j] = '\0';
+
+    char out[220];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|MEM|%u|%04X|%s|%lu|%lu|%08lX|%u",
+        static_cast<unsigned>(idx),
+        static_cast<unsigned>(member.node_id),
+        name_safe,
+        static_cast<unsigned long>(member.age_ms),
+        static_cast<unsigned long>(member.heartbeat_seq),
+        static_cast<unsigned long>(member.hop_seed),
+        static_cast<unsigned>(member.hops_away));
+    g_bluetooth.sendText(out);
+    return;
+  }
+
   if (strncmp(cmd, "HISTGET|", 8) == 0) {
     const uint16_t idx = static_cast<uint16_t>(strtoul(cmd + 8, nullptr, 10));
     LifeLinkLoRaNode::MessageHistoryEntry entry{};
@@ -124,6 +167,7 @@ void onBluetoothMessage(const char* msg, size_t len) {
 
 void setup() {
   g_lora_node.begin();
+  g_display.begin();
   g_bluetooth.setMessageCallback(onBluetoothMessage);
   g_bluetooth.begin();
 }
@@ -131,4 +175,5 @@ void setup() {
 void loop() {
   g_bluetooth.tick();
   g_lora_node.tick();
+  g_display.update(g_lora_node);
 }

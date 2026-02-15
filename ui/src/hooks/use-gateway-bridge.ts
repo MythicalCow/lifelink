@@ -33,6 +33,16 @@ export interface GatewayMessageHistory {
   body: string;
 }
 
+export interface GatewayMember {
+  idx: number;
+  node_id: string;
+  name: string;
+  age_ms: number;
+  heartbeat_seq: number;
+  hop_seed: string;
+  hops_away: number;
+}
+
 const GATEWAY_BASE = "http://127.0.0.1:8765";
 
 const DEFAULT_STATE: GatewayState = {
@@ -55,6 +65,7 @@ export function useGatewayBridge() {
   const [logs, setLogs] = useState<string[]>([]);
   const [devices, setDevices] = useState<GatewayDevice[]>([]);
   const [messageHistory, setMessageHistory] = useState<GatewayMessageHistory[]>([]);
+  const [members, setMembers] = useState<GatewayMember[]>([]);
 
   const api = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const res = await fetch(`${GATEWAY_BASE}${path}`, {
@@ -110,6 +121,7 @@ export function useGatewayBridge() {
   const disconnect = useCallback(async () => {
     await api<{ ok: boolean }>("/disconnect", { method: "POST" });
     setMessageHistory([]);
+    setMembers([]);
     await refreshState();
   }, [api, refreshState]);
 
@@ -117,6 +129,12 @@ export function useGatewayBridge() {
     const data = await api<{ messages: GatewayMessageHistory[] }>("/messages?limit=60");
     setMessageHistory(data.messages);
     return data.messages;
+  }, [api]);
+
+  const fetchMembers = useCallback(async () => {
+    const data = await api<{ members: GatewayMember[] }>("/members?limit=60");
+    setMembers(data.members);
+    return data.members;
   }, [api]);
 
   const command = useCallback(
@@ -137,17 +155,32 @@ export function useGatewayBridge() {
     return () => window.clearInterval(id);
   }, [refreshState]);
 
+  useEffect(() => {
+    if (!state.connected) return;
+    void fetchMembers().catch(() => {
+      // connected node may be on older firmware without member commands
+    });
+    const id = window.setInterval(() => {
+      void fetchMembers().catch(() => {
+        // keep polling best-effort
+      });
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [fetchMembers, state.connected]);
+
   return {
     online,
     state,
     logs,
     devices,
     messageHistory,
+    members,
     scan,
     connect,
     disconnect,
     command,
     fetchMessages,
+    fetchMembers,
     refreshState,
   };
 }

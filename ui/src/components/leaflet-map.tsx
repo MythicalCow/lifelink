@@ -252,7 +252,8 @@ export function LeafletMap({
         {!hasSimulation &&
           nodes.map((node) => {
             const isAnchor = node.isAnchor ?? false;
-            const color = isAnchor ? "#d97706" : "#6b9e8a";
+            const hasLocation = node.locationKnown !== false;
+            const color = hasLocation ? (isAnchor ? "#d97706" : "#6b9e8a") : "#9ca3af";
             return (
               <CircleMarker
                 key={`node-static-${node.id}`}
@@ -261,9 +262,10 @@ export function LeafletMap({
                 pathOptions={{
                   color,
                   weight: 2,
-                  opacity: 0.9,
-                  fillColor: isAnchor ? color : "transparent",
-                  fillOpacity: isAnchor ? 0.3 : 0,
+                  opacity: hasLocation ? 0.9 : 0.5,
+                  fillColor: hasLocation && isAnchor ? color : "transparent",
+                  fillOpacity: hasLocation && isAnchor ? 0.3 : 0,
+                  dashArray: hasLocation ? undefined : "3 3",
                 }}
               >
                 <Tooltip
@@ -273,8 +275,18 @@ export function LeafletMap({
                 >
                   <span className="font-semibold">
                     {node.label || `Node ${node.id}`}
-                    {isAnchor && " 📍"}
+                    {hasLocation && isAnchor && " 📍"}
                   </span>
+                  {node.hardwareIdHex && (
+                    <span className="block opacity-50 text-[10px]">
+                      0x{node.hardwareIdHex}
+                    </span>
+                  )}
+                  {!hasLocation && (
+                    <span className="block opacity-60 text-[10px]">
+                      Mesh discovered (location unknown)
+                    </span>
+                  )}
                 </Tooltip>
               </CircleMarker>
             );
@@ -306,20 +318,22 @@ export function LeafletMap({
           })}
 
         {!hasSimulation &&
-          nodes.map((node) => (
-            <Circle
-              key={`perimeter-static-${node.id}`}
-              center={[node.lat, node.lng]}
-              radius={node.radius ?? 170}
-              pathOptions={{
-                color: node.isAnchor ? "#d97706" : "#6b9e8a",
-                weight: 1,
-                opacity: 0.15,
-                fillColor: node.isAnchor ? "#d97706" : "#6b9e8a",
-                fillOpacity: 0.03,
-              }}
-            />
-          ))}
+          nodes
+            .filter((node) => node.locationKnown !== false)
+            .map((node) => (
+              <Circle
+                key={`perimeter-static-${node.id}`}
+                center={[node.lat, node.lng]}
+                radius={node.radius ?? 170}
+                pathOptions={{
+                  color: node.isAnchor ? "#d97706" : "#6b9e8a",
+                  weight: 1,
+                  opacity: 0.15,
+                  fillColor: node.isAnchor ? "#d97706" : "#6b9e8a",
+                  fillOpacity: 0.03,
+                }}
+              />
+            ))}
 
         {/* Suggested nodes */}
         {suggestions.map((node) => (

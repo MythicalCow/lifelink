@@ -264,6 +264,14 @@ class BleGateway:
         expected_prefixes = ("OK|HIST|", "ERR|HIST|")
         timeout_s = 1.6
         attempts = 3
+      elif command == "MEMCOUNT":
+        expected_prefixes = ("OK|MEMCOUNT|",)
+        timeout_s = 1.6
+        attempts = 3
+      elif command.startswith("MEMGET|"):
+        expected_prefixes = ("OK|MEM|", "ERR|MEM|")
+        timeout_s = 1.6
+        attempts = 3
       await self._send_and_wait_locked(command, expected_prefixes, timeout=timeout_s, attempts=attempts)
 
   async def fetch_messages(self, limit: int = 40) -> list[dict[str, Any]]:
@@ -301,6 +309,39 @@ class BleGateway:
                 "intent": row[7],
                 "urgency": int(row[8]),
                 "body": body,
+            }
+        )
+      return out
+
+  async def fetch_members(self, limit: int = 40) -> list[dict[str, Any]]:
+    async with self._lock:
+      if self._client is None or not self._client.is_connected or self._rx_char is None:
+        raise RuntimeError("No BLE device connected.")
+      await self._send_and_wait_locked("MEMCOUNT", ("OK|MEMCOUNT|",), timeout=1.6, attempts=3)
+      parts = self._state.last_response.split("|")
+      if len(parts) < 3:
+        return []
+      try:
+        count = int(parts[2])
+      except ValueError:
+        return []
+      start = max(0, count - max(1, min(limit, 200)))
+      out: list[dict[str, Any]] = []
+      for idx in range(start, count):
+        await self._send_and_wait_locked(f"MEMGET|{idx}", ("OK|MEM|",), timeout=1.6, attempts=3)
+        row = self._state.last_response.split("|")
+        # OK|MEM|idx|node_id|name|age_ms|hb_seq|seed|hops_away
+        if len(row) < 8:
+          continue
+        out.append(
+            {
+                "idx": int(row[2]),
+                "node_id": row[3].upper(),
+                "name": row[4],
+                "age_ms": int(row[5]),
+                "heartbeat_seq": int(row[6]),
+                "hop_seed": row[7].upper(),
+                "hops_away": int(row[8]) if len(row) > 8 else 1,
             }
         )
       return out
@@ -413,6 +454,15 @@ async def messages(limit: int = 40) -> dict[str, Any]:
   try:
     items = await gateway.fetch_messages(limit=max(1, min(limit, 200)))
     return {"messages": items}
+  except Exception as exc:
+    raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/members")
+async def members(limit: int = 40) -> dict[str, Any]:
+  try:
+    items = await gateway.fetch_members(limit=max(1, min(limit, 200)))
+    return {"members": items}
   except Exception as exc:
     raise HTTPException(status_code=400, detail=str(exc))
 
