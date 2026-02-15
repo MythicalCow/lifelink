@@ -14,8 +14,8 @@ LifeLinkLoRaNode* LifeLinkLoRaNode::instance_ = nullptr;
 volatile bool LifeLinkLoRaNode::operation_done_ = false;
 
 namespace {
-constexpr float kHopChannelsMhz[8] = {
-    903.9f, 904.1f, 904.3f, 904.5f, 904.7f, 904.9f, 905.1f, 905.3f};
+constexpr float kHopChannelsMhz[2] = {
+    903.9f, 904.1f};
 }
 
 #if defined(ESP8266) || defined(ESP32)
@@ -87,7 +87,13 @@ void LifeLinkLoRaNode::tick() {
  * ═══════════════════════════════════════════════════════ */
 
 uint32_t LifeLinkLoRaNode::resolveNodeId() const {
+  // Use the BLE MAC so that the node ID matches what users see during BLE scan.
+  // On ESP32-S3 the BLE MAC is base MAC + 1, while WiFi STA is base MAC + 0.
   uint8_t mac[6] = {0};
+  if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+    return (static_cast<uint32_t>(mac[4]) << 8) | static_cast<uint32_t>(mac[5]);
+  }
+  // Fallback: WiFi STA MAC
   if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
     return (static_cast<uint32_t>(mac[4]) << 8) | static_cast<uint32_t>(mac[5]);
   }

@@ -88,8 +88,8 @@ class LifeLinkLoRaNode {
 
   /* ── Protocol constants (aligned with simulation) ── */
   static constexpr size_t kBufferSize = 220;         // increased for gossip
-  static constexpr unsigned long kHeartbeatIntervalMs = 5000;
-  static constexpr unsigned long kHeartbeatJitterMs = 1500;
+  static constexpr unsigned long kHeartbeatIntervalMs = 2000;
+  static constexpr unsigned long kHeartbeatJitterMs = 800;
   static constexpr unsigned long kMembershipTimeoutMs = 30000;
   static constexpr unsigned long kTestDataIntervalMs = 12000;
   static constexpr unsigned long kAckTimeoutMs = 12000;
@@ -100,7 +100,7 @@ class LifeLinkLoRaNode {
   static constexpr size_t kMaxTxQueue = 12;
   static constexpr size_t kMaxPendingData = 12;
   static constexpr size_t kMaxMessageHistory = 64;
-  static constexpr size_t kHopChannelCount = 8;
+  static constexpr size_t kHopChannelCount = 2;
   static constexpr unsigned long kHopIntervalMs = 5000;
 
   enum class PacketType : uint8_t {
