@@ -24,14 +24,12 @@ LifeLink fixes that. We give civilians their own infrastructure.
 
 ## What It Is
 
-LifeLink is a decentralized mesh communication network built on cheap LoRa hardware. Any citizen can deploy a node by pressing a single button. It auto-joins the mesh, requires no technical knowledge, and works entirely offline. Users connect to the nearest node over Bluetooth with a phone app and send messages that the mesh relays across the network.
-
-**Citizens create the infrastructure. No towers. No ISPs. No permission.**
+LifeLink is a decentralized mesh communication network built on cheap LoRa hardware. Any citizen can deploy a node by pressing a single button. It auto-joins the mesh, requires no technical knowledge, and works entirely offline. Users connect to the nearest node over Bluetooth with a phone app and send messages that the mesh relays across the network. Then, first responders can see the network and the nodes' approximate locations using triangularization of signals, for hotspot response and network expansion (placing more nodes).
 
 ## Architecture
 
 ```
-┌──────────┐  Bluetooth   ┌──────────┐  LoRa 915MHz  ┌──────────┐  LoRa  ┌──────────┐
+┌──────────┐  Bluetooth   ┌──────────┐       LoRa     ┌──────────┐  LoRa  ┌──────────┐
 │  Phone   │◄────────────►│  Node A  │◄──────────────►│  Node B  │◄──────►│  Node C  │
 │  (App)   │              │  ESP32   │                │  ESP32   │        │  ESP32   │
 └──────────┘              └──────────┘                └──────────┘        └──────────┘
