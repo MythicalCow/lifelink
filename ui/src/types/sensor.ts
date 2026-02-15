@@ -13,6 +13,10 @@ export interface SensorNode {
   active?: boolean;
   /** Whether this node is a GPS anchor (known position) */
   isAnchor?: boolean;
+  /** Hardware LoRa node ID as uppercase hex (e.g. "E504") */
+  hardwareIdHex?: string;
+  /** BLE address used during setup/connect */
+  bleAddress?: string;
 }
 
 export interface SuggestedNode {

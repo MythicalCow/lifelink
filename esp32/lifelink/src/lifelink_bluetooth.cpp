@@ -106,6 +106,15 @@ void LifeLinkBluetooth::tick() {
   }
 }
 
+bool LifeLinkBluetooth::sendText(const char* text) {
+  if (!device_connected_ || tx_characteristic_ == nullptr || text == nullptr) {
+    return false;
+  }
+  tx_characteristic_->setValue(reinterpret_cast<uint8_t*>(const_cast<char*>(text)), strlen(text));
+  tx_characteristic_->notify();
+  return true;
+}
+
 void LifeLinkBluetooth::startAdvertising() {
   if (advertising_started_)
     return;
@@ -124,8 +133,10 @@ void LifeLinkBluetooth::onClientConnect() {
 void LifeLinkBluetooth::onClientDisconnect() {
   device_connected_ = false;
   advertising_started_ = false;
-  state_ = BtState::kDisconnected;
-  Serial.println("[BT] Client disconnected.");
+  // Re-advertise immediately so setup can quickly switch to another node.
+  startAdvertising();
+  state_ = BtState::kConnecting;
+  Serial.println("[BT] Client disconnected; advertising resumed.");
 }
 
 void LifeLinkBluetooth::onMessageWritten(const uint8_t* data, size_t len) {

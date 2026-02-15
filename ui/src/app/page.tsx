@@ -5,8 +5,9 @@ import { Header, type ViewMode } from "@/components/header";
 import { SensorField } from "@/components/sensor-field";
 import { SimControls } from "@/components/sim-controls";
 import { Messenger, type ChatMessage } from "@/components/messenger";
-import { Sensors } from "@/components/sensors";
+import { HardwareSetup } from "@/components/hardware-setup";
 import { useSimulation } from "@/hooks/use-simulation";
+import { useGatewayBridge } from "@/hooks/use-gateway-bridge";
 import type { SensorNode } from "@/types/sensor";
 import {
   SUGGESTED_NODES,
@@ -23,16 +24,18 @@ export default function Home() {
   const nextNodeId = useRef(1);
 
   const sim = useSimulation(nodes);
+  const gateway = useGatewayBridge();
 
   /* ── Lifted message state — persists across tab switches ── */
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const msgCounter = useRef(0);
+  const msgCounterRef = useRef(0);
 
   /* ── Persist delivery / failure statuses back into messages ── */
   useEffect(() => {
     if (!sim.state) return;
     const { deliveredTrackingIds, tick } = sim.state;
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMessages((prev) => {
       let changed = false;
       const next = prev.map((msg) => {
@@ -55,33 +58,38 @@ export default function Home() {
     });
   }, [sim.state]);
 
-  /* ── Send + auto-play so the message actually routes ── */
-  const handleMessengerSend = useCallback(
-    (from: number, to: number, trackingId?: string) => {
-      sim.sendMessage(from, to, trackingId);
-      if (!sim.running) {
-        sim.play();
-      }
-    },
-    [sim],
-  );
-
   /* ── Node configured via BLE (from Sensors tab) ── */
   const handleNodeConfigured = useCallback((config: {
     name: string;
     lat: number;
     lng: number;
     isAnchor: boolean;
+    hardwareIdHex: string;
+    bleAddress: string;
   }) => {
-    const id = nextNodeId.current++;
-    setNodes((prev) => [...prev, {
-      id,
-      lat: config.lat,
-      lng: config.lng,
-      label: config.name,
-      radius: 170,
-      isAnchor: config.isAnchor,
-    }]);
+    setNodes((prev) => {
+      const existingIdx = prev.findIndex(
+        (n) => (n.hardwareIdHex || "").toUpperCase() === config.hardwareIdHex.toUpperCase(),
+      );
+
+      const nextNode: SensorNode = {
+        id: existingIdx >= 0 ? prev[existingIdx].id : nextNodeId.current++,
+        lat: config.lat,
+        lng: config.lng,
+        label: config.name,
+        radius: 170,
+        isAnchor: config.isAnchor,
+        hardwareIdHex: config.hardwareIdHex.toUpperCase(),
+        bleAddress: config.bleAddress,
+      };
+
+      if (existingIdx >= 0) {
+        const copy = [...prev];
+        copy[existingIdx] = nextNode;
+        return copy;
+      }
+      return [...prev, nextNode];
+    });
   }, []);
 
   /* ── Derived counts ── */
@@ -125,17 +133,32 @@ export default function Home() {
       {view === "messages" && (
         <Messenger
           nodes={nodes}
-          simState={sim.state}
           messages={messages}
           setMessages={setMessages}
-          msgCounter={msgCounter}
-          onSendMessage={handleMessengerSend}
+          msgCounterRef={msgCounterRef}
+          gatewayOnline={gateway.online}
+          gatewayState={gateway.state}
+          gatewayDevices={gateway.devices}
+          gatewayLogs={gateway.logs}
+          onGatewayScan={gateway.scan}
+          onGatewayConnect={gateway.connect}
+          onGatewayDisconnect={gateway.disconnect}
+          onGatewayCommand={gateway.command}
         />
       )}
 
       {/* ── Sensors view (BLE node configuration) ─────── */}
       {view === "sensors" && (
-        <Sensors onNodeConfigured={handleNodeConfigured} />
+        <HardwareSetup
+          online={gateway.online}
+          state={gateway.state}
+          devices={gateway.devices}
+          onScan={gateway.scan}
+          onConnect={gateway.connect}
+          onDisconnect={gateway.disconnect}
+          onCommand={gateway.command}
+          onNodeConfigured={handleNodeConfigured}
+        />
       )}
 
       <footer className="absolute inset-x-0 bottom-0 z-[1000] flex items-center justify-between px-8 py-4 text-[11px] text-[var(--muted)]">
@@ -146,6 +169,10 @@ export default function Home() {
             : view === "messages"
               ? "Stanford Campus — Mesh Messenger"
               : "Stanford Campus — Node Setup"}
+        </span>
+        <span>
+          Gateway {gateway.online ? (gateway.state.connected ? `connected 0x${gateway.state.node_id}` : "online") : "offline"}
+          {gateway.state.connected && ` · hop ch${gateway.state.hop_channel} ${gateway.state.hop_frequency_mhz.toFixed(1)}MHz`}
         </span>
       </footer>
     </main>

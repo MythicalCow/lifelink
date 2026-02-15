@@ -1,4 +1,4 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is the LifeLink Next.js + Tailwind UI project.
 
 ## Getting Started
 
@@ -16,7 +16,32 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## BLE Bridge Test Page
+
+For hardware integration testing (BLE -> LoRa relay), open:
+
+- [http://localhost:3000/bridge](http://localhost:3000/bridge)
+
+This page supports:
+
+1. Connecting to a node over BLE (through local gateway service).
+2. Reading node identity (`WHOAMI`) and setting node name (`NAME|...`).
+3. Saving nodes to a local "managed nodes" list.
+4. Sending LoRa messages via connected node (`SEND|<dst_hex>|<text>`).
+
+### Start local BLE gateway (required)
+
+The browser no longer uses Web Bluetooth directly. Start a local BLE gateway:
+
+```bash
+cd ui
+python3 -m pip install -r tools/requirements-ble-gateway.txt
+npm run gateway
+```
+
+Then run `npm run dev` and open `/bridge`.
+
+You can start editing pages under `src/app/`. The dev server auto-updates.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 

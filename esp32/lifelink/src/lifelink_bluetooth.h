@@ -30,6 +30,7 @@ class LifeLinkBluetooth {
 
   void begin();
   void tick();
+  bool sendText(const char* text);
 
   BtState state() const { return state_; }
   void setMessageCallback(MessageCallback cb) { message_callback_ = cb; }
