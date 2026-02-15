@@ -28,8 +28,22 @@ export interface BanditStats {
 }
 
 export class BanditTracker {
+  /** Index of the node that owns this tracker (for data management) */
+  private nodeIndex: number;
+  
   private stats: Map<string, BanditArmStats> = new Map();
   private maxHistorySize = 100; // Keep last 100 outcomes per arm
+
+  constructor(nodeIndex: number) {
+    this.nodeIndex = nodeIndex;
+  }
+
+  /**
+   * Get the index of the node that owns this tracker
+   */
+  getNodeIndex(): number {
+    return this.nodeIndex;
+  }
 
   /**
    * Record a message send attempt

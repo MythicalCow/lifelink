@@ -53,6 +53,7 @@ export interface NodeStorage {
 
 export class MeshNode {
   id: number;
+  nodeIndex: number; // This node's index in the network (same as id, for clear tracking)
   label: string;
 
   /**
@@ -140,7 +141,7 @@ export class MeshNode {
   txQueue: MeshPacket[] = [];
 
   /** Bandit tracker for message delivery success/failure on (frequency, recipient) pairs */
-  bandit: BanditTracker = new BanditTracker();
+  bandit: BanditTracker;
 
   /** Track pending sends for correlation with delivery confirmations */
   protected pendingMessages: Map<string, { 
@@ -158,6 +159,7 @@ export class MeshNode {
     isAnchor: boolean,
   ) {
     this.id = id;
+    this.nodeIndex = id; // Store node index for clear tracking
     this.trueLat = trueLat;
     this.trueLng = trueLng;
     this.label = label;
@@ -169,6 +171,9 @@ export class MeshNode {
       this.estLng = trueLng;
       this.posConfidence = 1;
     }
+
+    // Initialize bandit tracker with this node's index
+    this.bandit = new BanditTracker(id);
 
     // Initialize crypto/trust storage
     this.storage = {
@@ -362,7 +367,8 @@ export class MeshNode {
 
   /**
    * Enqueue a heartbeat as a regular broadcast DATA message.
-   * This triggers normal ACK-based delivery confirmation and bandit learning.
+   * Heartbeats are broadcast to all neighbors and are not tracked in the bandit system,
+   * since they don't have a specific recipient node.
    * The message payload contains gossip information.
    */
   private enqueueHeartbeatMessage(): void {
@@ -375,16 +381,10 @@ export class MeshNode {
     // Send as broadcast DATA message
     // Using BROADCAST as destination, which will be sent to all neighbors
     const packetId = `${this.id}-${this.packetCounter++}`;
-    const frequency = 1; // Direct broadcast to neighbors
     
-    // Track as pending for delivery confirmation
-    // Use a special marker in payload to identify heartbeat
-    this.pendingMessages.set(packetId, {
-      destId: BROADCAST,
-      recipientId: BROADCAST, // We'll track success if any neighbor acks
-      sentTick: this.currentTick,
-      frequency,
-    });
+    // NOTE: Heartbeats are NOT tracked in bandit system since they are broadcasts
+    // to all neighbors, not to a specific node. Only unicast messages to specific
+    // node IDs (destId > 0) are tracked for delivery learning.
     
     this.txQueue.push({
       id: packetId,

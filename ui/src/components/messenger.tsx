@@ -183,6 +183,9 @@ export function Messenger({
     for (const op of QUICK_OPS) initial[op.id] = true;
     return initial;
   });
+  const [isQuickAddExpanded, setIsQuickAddExpanded] = useState(false);
+  const [isSendToExpanded, setIsSendToExpanded] = useState(true);
+  const [isMessageViewExpanded, setIsMessageViewExpanded] = useState(true);
   const [viewMode, setViewMode] = useState<"log" | "all-logs" | "send-receive">("log");
   const [expandedMessageIds, setExpandedMessageIds] = useState<Set<string>>(
     () => new Set(),
@@ -567,8 +570,8 @@ export function Messenger({
     >
 
 
-      <div className={isPanel ? "flex min-h-0 flex-1 gap-5 px-4 pb-4 pt-2" : "flex flex-col"}>
-        <div className={isPanel ? "flex w-[320px] shrink-0 flex-col gap-4 overflow-y-auto" : ""}>
+      <div className={isPanel ? "flex min-h-0 flex-1 px-4 pb-4 pt-2" : "flex flex-col"}>
+        <div className={isPanel ? "flex w-full flex-col gap-4 overflow-y-auto" : ""}>
           {/* ── Gateway selector (BLE) ──────────────────────── */}
           <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4 pt-2"}>
             {allowAnyGateway && (
@@ -656,14 +659,19 @@ export function Messenger({
           {/* ── Quick add random messages ────────────────── */}
           <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
             <div className="flex items-center justify-between pb-1.5">
-              <span className="text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase">
+              <button
+                onClick={() => setIsQuickAddExpanded(!isQuickAddExpanded)}
+                className="flex items-center gap-1.5 text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase hover:text-[var(--accent)] transition-colors"
+              >
+                <span className={`transform transition-transform ${isQuickAddExpanded ? 'rotate-90' : ''}`}>▶</span>
                 ⚡ Quick add
-              </span>
+              </button>
               <span className="text-[10px] text-[var(--muted)]/50">
                 {scheduledMessages.length} queued
               </span>
             </div>
 
+            {isQuickAddExpanded && (
             <div className="rounded-xl border border-[var(--foreground)]/[0.06] bg-[var(--foreground)]/[0.03] p-3">
               <div className="mb-2.5 flex items-center justify-between gap-2">
                 <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--foreground)]/60">Count messages</span>
@@ -814,6 +822,7 @@ export function Messenger({
                 ))}
               </div>
             </div>
+            )}
           </div>
 
           {/* ── Global message queue ───────────────────────── */}
@@ -1126,73 +1135,24 @@ export function Messenger({
               )}
             </div>
           </div>
-        </div>
 
-        <div className={isPanel ? "flex min-w-0 flex-1 flex-col" : ""}>
-          {/* ── View mode toggle + Clear Messages ───────────── */}
-          <div className={isPanel ? "w-full px-2 pt-2" : "mx-auto w-full max-w-lg px-4 pt-2"}>
-            <div className="flex items-center justify-between gap-2 pb-2">
-              <div className="flex items-center gap-2">
-                {onRefresh && messages.length > 0 && (
-                  <button
-                    onClick={onRefresh}
-                    className="rounded-lg bg-[var(--accent)]/10 px-2.5 py-1 text-[10px] font-medium text-[var(--accent)] shadow-sm backdrop-blur-sm transition-colors hover:bg-[var(--accent)]/20"
-                  >
-                    🔄 Clear All
-                  </button>
-                )}
-              </div>
-              <span className="text-[10px] font-semibold tracking-wide text-[var(--muted)] uppercase">
-                View Mode
-              </span>
-              <div className="flex items-center gap-2 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
-                <button
-                  onClick={() => setViewMode("log")}
-                  className={`rounded-full px-3 py-1 text-[10px] font-medium transition-colors ${
-                    viewMode === "log"
-                      ? "bg-white text-[var(--foreground)]"
-                      : "text-[var(--muted)]"
-                  }`}
-                >
-                  Log
-                </button>
-                <button
-                  onClick={() => setViewMode("all-logs")}
-                  className={`rounded-full px-3 py-1 text-[10px] font-medium transition-colors ${
-                    viewMode === "all-logs"
-                      ? "bg-white text-[var(--foreground)]"
-                      : "text-[var(--muted)]"
-                  }`}
-                >
-                  All Logs
-                </button>
-                <button
-                  onClick={() => setViewMode("send-receive")}
-                  className={`rounded-full px-3 py-1 text-[10px] font-medium transition-colors ${
-                    viewMode === "send-receive"
-                      ? "bg-white text-[var(--foreground)]"
-                      : "text-[var(--muted)]"
-                  }`}
-                >
-                  Send/Receive
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* ── Destination selector (LoRa mesh) ───────────── */}
+          {/* ── Send To (Destination selector) ───────────── */}
           {viewMode !== "all-logs" && (
-            <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
-              <div className="flex items-center gap-2 pb-1.5">
-                <span className="text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase">
-                  📡 Send to
-                </span>
-                <span className="text-[10px] text-[var(--muted)]/50">LoRa mesh</span>
-                <span className="text-[10px] text-[var(--muted)]/40">
-                  · {discoveredCount} discovered
-                </span>
-              </div>
+          <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
+            <div className="flex items-center justify-between pb-1.5">
+              <button
+                onClick={() => setIsSendToExpanded(!isSendToExpanded)}
+                className="flex items-center gap-1.5 text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase hover:text-[var(--accent)] transition-colors"
+              >
+                <span className={`transform transition-transform ${isSendToExpanded ? 'rotate-90' : ''}`}>▶</span>
+                📡 Send to
+              </button>
+              <span className="text-[10px] text-[var(--muted)]/50">
+                {discoveredCount} discovered
+              </span>
+            </div>
 
+            {isSendToExpanded && (
               <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
                 {/* Destination chips — labels come from gossip discovery */}
                 {destinations.map((node) => {
@@ -1254,25 +1214,71 @@ export function Messenger({
                   );
                 })}
               </div>
-            </div>
+            )}
+          </div>
           )}
 
-      {/* ── Divider ────────────────────────────────────── */}
-      {viewMode !== "all-logs" && (
-        <div className={isPanel ? "w-full px-1" : "mx-auto w-full max-w-lg px-6"}>
-          <div className="h-px bg-[var(--foreground)]/[0.06]" />
-        </div>
-      )}
+          {/* ── Message View ───────────── */}
+          <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
+            <div className="flex items-center justify-between pb-1.5">
+              <button
+                onClick={() => setIsMessageViewExpanded(!isMessageViewExpanded)}
+                className="flex items-center gap-1.5 text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase hover:text-[var(--accent)] transition-colors"
+              >
+                <span className={`transform transition-transform ${isMessageViewExpanded ? 'rotate-90' : ''}`}>▶</span>
+                💬 Messages
+              </button>
+              <div className="flex items-center gap-2">
+                {onRefresh && messages.length > 0 && (
+                  <button
+                    onClick={onRefresh}
+                    className="rounded-lg bg-[var(--accent)]/10 px-2 py-0.5 text-[9px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/20"
+                  >
+                    Clear
+                  </button>
+                )}
+                <div className="flex items-center gap-1 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
+                  <button
+                    onClick={() => setViewMode("log")}
+                    className={`rounded-full px-2 py-0.5 text-[9px] font-medium transition-colors ${
+                      viewMode === "log"
+                        ? "bg-white text-[var(--foreground)]"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    Log
+                  </button>
+                  <button
+                    onClick={() => setViewMode("all-logs")}
+                    className={`rounded-full px-2 py-0.5 text-[9px] font-medium transition-colors ${
+                      viewMode === "all-logs"
+                        ? "bg-white text-[var(--foreground)]"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    All
+                  </button>
+                  <button
+                    onClick={() => setViewMode("send-receive")}
+                    className={`rounded-full px-2 py-0.5 text-[9px] font-medium transition-colors ${
+                      viewMode === "send-receive"
+                        ? "bg-white text-[var(--foreground)]"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    S/R
+                  </button>
+                </div>
+              </div>
+            </div>
 
-      {/* ── Thread / log area ──────────────────────────── */}
-      <div
-        ref={threadRef}
-        className={`flex w-full flex-col gap-2 overflow-y-auto scrollbar-none ${
-          isPanel
-            ? "min-h-0 flex-1 px-2 py-4"
-            : "mx-auto max-w-lg flex-1 px-6 py-4"
-        }`}
-      >
+            {isMessageViewExpanded && (
+            <div>
+              {/* ── Thread / log area ──────────────────────────── */}
+              <div
+                ref={threadRef}
+                className="flex w-full flex-col gap-2 overflow-y-auto scrollbar-none max-h-96 rounded-xl border border-[var(--foreground)]/[0.06] bg-[var(--foreground)]/[0.02] p-3"
+              >
         {viewMode === "all-logs" ? (
           // ALL LOGS MODE: Show every message from everywhere
           <>
@@ -1433,34 +1439,9 @@ export function Messenger({
         )}
       </div>
 
-      {/* ── Send/Receive columns removed from here (now in thread area) ── */}
-
-      {/* ── Summary bar ────────────────────────────────── */}
-      {messages.length > 0 && viewMode !== "all-logs" && (
-        <div
-          className={`flex w-full items-center justify-center gap-4 py-1.5 ${
-            isPanel ? "px-2" : "mx-auto max-w-lg px-6"
-          }`}
-        >
-          <span className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
-            {deliveredCount} delivered
-          </span>
-          {pendingCount > 0 && (
-            <span className="flex items-center gap-1.5 text-[10px] text-[var(--suggest)]">
-              <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--suggest)]" />
-              {pendingCount} in transit
-            </span>
-          )}
-          <span className="text-[10px] text-[var(--muted)]/50">
-            tick {simState?.tick ?? 0}
-          </span>
-        </div>
-      )}
-
-      {/* ── Route path + Composer ───────────────────────── */}
+      {/* ── Composer ───────────────────────── */}
       {viewMode !== "all-logs" && (
-        <div className={isPanel ? "w-full px-2 pb-2" : "mx-auto w-full max-w-lg px-4 pb-2"}>
+        <div className="mt-3">
           {/* Route visualization */}
           {gatewayNode &&
             selectedDest !== null &&
@@ -1552,8 +1533,30 @@ export function Messenger({
                 : `Acting as ${gatewayNode.label} (simulation override)`}
             </p>
           )}
+
+          {/* Summary bar */}
+          {messages.length > 0 && viewMode !== "all-logs" && (
+            <div className="flex w-full items-center justify-center gap-4 py-1.5 mt-1">
+              <span className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                {deliveredCount} delivered
+              </span>
+              {pendingCount > 0 && (
+                <span className="flex items-center gap-1.5 text-[10px] text-[var(--suggest)]">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--suggest)]" />
+                  {pendingCount} in transit
+                </span>
+              )}
+              <span className="text-[10px] text-[var(--muted)]/50">
+                tick {simState?.tick ?? 0}
+              </span>
+            </div>
+          )}
         </div>
       )}
+      </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
