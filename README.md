@@ -2,6 +2,8 @@
 
 # LifeLink
 
+<img src="lifelink.png" alt="LifeLink Logo" width="160" height = "160" style="border-radius: 50%;" />
+
 **Decentralized emergency communication for civilians when infrastructure fails.**
 
 `LoRa mesh` · `zero-config deployment` · `jam-resilient` · `~$5/node at scale`
