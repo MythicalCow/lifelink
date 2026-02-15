@@ -12,7 +12,7 @@
 
 > [!IMPORTANT]
 > 📄 **Technical Report:**  
-> Read the full report here: **[LifeLink Technical Report (PDF)](technical_report/LifeLink_TechnicalReport.pdf)**
+> Read the full report here: **[LifeLink Technical Report (PDF)](technical_report/Technical_Report.pdf)**
 
 ## The Problem
 
