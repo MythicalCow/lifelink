@@ -14,7 +14,7 @@ Firmware for Heltec WiFi LoRa 32 V3 nodes.
 ## Build
 
 ```bash
-cd /home/mythicalcow/lifelink/esp32/lifelink
+cd esp32/lifelink
 pio run
 ```
 

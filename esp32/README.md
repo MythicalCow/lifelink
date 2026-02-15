@@ -22,7 +22,7 @@ pipx install platformio
 ## Build
 
 ```bash
-cd /home/mythicalcow/lifelink/esp32/lifelink
+cd esp32/lifelink
 pio run
 ```
 
@@ -31,7 +31,7 @@ pio run
 List serial ports:
 
 ```bash
-cd /home/mythicalcow/lifelink/esp32/lifelink
+cd esp32/lifelink
 pio device list
 ```
 

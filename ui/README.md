@@ -15,14 +15,14 @@ This is the operator UI for LifeLink. It includes:
 ## 1) Install UI dependencies
 
 ```bash
-cd /home/mythicalcow/lifelink/ui
+cd ui
 npm install
 ```
 
 ## 2) Create BLE gateway venv and install Python deps (includes bleak)
 
 ```bash
-cd /home/mythicalcow/lifelink/ui
+cd ui
 python3 -m venv .venv-ble-gateway
 . .venv-ble-gateway/bin/activate
 pip install -U pip
@@ -38,7 +38,7 @@ pip install -r tools/requirements-ble-gateway.txt
 ## 3) Start BLE gateway
 
 ```bash
-cd /home/mythicalcow/lifelink/ui
+cd ui
 npm run gateway
 ```
 
@@ -56,7 +56,7 @@ curl -s 'http://127.0.0.1:8765/devices?timeout=3'
 In a second terminal:
 
 ```bash
-cd /home/mythicalcow/lifelink/ui
+cd ui
 npm run dev
 ```
 
@@ -85,7 +85,7 @@ Open: `http://localhost:3000`
 ### Gateway not reachable
 
 ```bash
-cd /home/mythicalcow/lifelink/ui
+cd ui
 pkill -9 -f 'tools/ble_gateway.py|npm run gateway|uvicorn.*8765' || true
 npm run gateway
 ```
