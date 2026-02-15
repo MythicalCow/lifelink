@@ -17,15 +17,15 @@
 \usetikzlibrary{shapes, arrows.meta, positioning, fit, calc}
 
 % Title and Author
-\title{\textbf{LifeLink: Resilient Mesh Communication in Spectrally Contested Environments \\ via Semantic Compression and Economic Asymmetry}}
+\title{\textbf{LifeLink: Resilient Mesh Communication in Contested Environments \\ via Semantic Compression and Economic Asymmetry}}
 
 \author{
   \textbf{The LifeLink Team} \\
   Stanford TreeHacks 2026 \\
   \texttt{raghavt3@illinois.edu} \\
   \texttt{tkoduru@umich.edu} \\
-  \texttt{rohan@WPI.edu} \\
-  \texttt{vijay@stanford.edu} \\
+  \texttt{rninamdar@wpi.edu} \\
+  \texttt{vdaita@stanford.edu} \\
 }
 
 \date{}
@@ -35,7 +35,7 @@
 \maketitle
 
 \begin{abstract}
-In modern conflict zones and disaster scenarios, civilians face a dual threat: the physical destruction of infrastructure and the active suppression of wireless communications. Adversaries increasingly deploy jamming to deny Wi-Fi/Cellular connectivity and GPS spoofing to disrupt navigation. We present \textbf{LifeLink}, a decentralized communication architecture designed for these Anti-Access/Area Denial (A2/AD) environments. By utilizing LoRa (915 MHz) hardware, we bypass high-frequency jamming, but incur severe bandwidth constraints. To solve this, we introduce \textit{Semantic Compression}—an edge-AI triage system that reduces natural language to 8-byte payloads. We further demonstrate that LifeLink creates an "Asymmetric Cost Exchange," where the financial and tactical cost to jam the network effectively exceeds the cost of deployment by orders of magnitude.
+In modern conflict zones and disaster scenarios, civilians face a dual threat: the physical destruction of infrastructure and the active suppression of wireless communications. Adversaries increasingly deploy jamming to deny Wi-Fi/Cellular connectivity and GPS spoofing to disrupt navigation. We present \textbf{LifeLink}, a decentralized communication architecture designed for these Anti-Access/Area Denial (A2/AD) environments. By utilizing LoRa (915 MHz) hardware, we bypass high-frequency jamming, but incur severe bandwidth constraints. To solve this, we introduce \textit{Semantic Compression}—an edge-AI triage system that reduces natural language to 25-byte payloads. We further demonstrate that LifeLink creates an "Asymmetric Cost Exchange," where the financial and tactical cost to jam the network effectively exceeds the cost of deployment by orders of magnitude.
 \end{abstract}
 
 \section{Introduction: The Spectral Denial Problem}
@@ -231,6 +231,44 @@ To avoid overstating claims, we explicitly note current abstractions:
     \item simplified trust/crypto semantics for protocol experimentation.
 \end{enumerate}
 These choices intentionally prioritize reproducibility, parameter sweeps, and systems-level insight over waveform-level emulation.
+
+\section{Future Work}
+While the current LifeLink prototype validates the core architecture of semantic compression and hybrid routing, scaling to city-wide deployment requires further optimization in hardware integration and protocol security.
+
+\subsection{Hardware Integration \& Miniaturization}
+The current node utilizes modular components (ESP32 DevKit, TP4056, discrete LoRa module) which increases Size, Weight, and Power (SWaP) and per-unit cost.
+
+To address this, we are working on designing a prototype monolithic Custom PCB (Current state in Figure \ref{fig:pcb_design}) that integrates the ESP32-S3 SoC, the SX1262 LoRa transceiver, and a dedicated MPPT solar management circuit onto a single board.
+This integration allows us to:
+\begin{enumerate}
+    \item \textbf{Reduce Footprint:} Compressing the node volume by $\approx$60\%, allowing for inconspicuous deployment in urban debris.
+    \item \textbf{Optimize RF Path:} Implementing a custom impedance-matched trace antenna to reduce signal loss compared to SMA connectors.
+    \item \textbf{Slash Costs:} Consolidating the Bill of Materials (BOM) drives the unit cost from \$40 (prototype) toward our target of \$5 at volume.
+\end{enumerate}
+
+\begin{figure}[h]
+    \centering
+    % Left Image: Schematic
+    \begin{minipage}{0.48\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{schematic.png} % REPLACE THIS
+        \caption{Schematic Design}
+    \end{minipage}\hfill
+    % Right Image: PCB
+    \begin{minipage}{0.48\columnwidth}
+        \centering
+        \includegraphics[width=\linewidth]{3D.png} % REPLACE THIS
+        \caption{PCB Layout}
+    \end{minipage}
+    \caption{\textbf{Proposed Hardware Integration.} Moving to a single-board design reduces manufacturing cost and improves physical resilience.}
+    \label{fig:pcb_design}
+\end{figure}
+
+\subsection{Protocol Hardening}
+Currently, trust is established via heuristic consensus (k-of-n confirmation). Future iterations will implement Lightweight Elliptic Curve Cryptography (ECC) directly on the ESP32. By signing packets with a private key, nodes can build a cryptographic reputation score, preventing "Sybil attacks" where a single adversary spoofs multiple witness nodes to inject false alerts.
+
+\subsection{Multilingual Model Generalization}
+The current semantic compression model is trained on English crisis datasets. To support global humanitarian deployment, we plan to utilize \textbf{Federated Learning}. This would allow the global model to be fine-tuned on user devices for local languages and slang without transmitting raw text back to a central server, preserving privacy while adapting to regional dialects.
 
 \section{Conclusion}
 LifeLink validates that civilian communication infrastructure can be hardened against state-level disruption. By combining the physics of LoRa propagation, the economics of cheap hardware, and the efficiency of semantic AI, we render the strategy of spectral jamming fiscally and tactically obsolete.
