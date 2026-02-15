@@ -144,12 +144,93 @@ Routing decisions for a packet at Node $N$ destined for $D$ follow a prioritized
     \item \textbf{Gradient Fallback:} If Geographic forwarding encounters a local minima (no neighbor is closer), the protocol falls back to the "Hops Away" gradient learned via gossip.
 \end{enumerate}
 
-\section{Simulation: The Capture Effect}
-To validate resilience, we developed a discrete-event simulator modeling the \textbf{LoRa Capture Effect}. In a collision where packet $P_A$ and $P_B$ arrive simultaneously, $P_A$ is successfully decoded if:
+\section{Simulation Engine: Physical Fidelity and Robustness}
+We implement a deterministic, tick-based network simulator (1 tick $\approx$ 100ms at 1$\times$ speed) that separates \textit{protocol logic} from \textit{RF environment physics}. This allows controlled stress-testing under contention, jamming, and topology churn.
+
+\subsection{Discrete-Time Execution Model}
+At each tick, the engine executes the following ordered phases:
+\begin{enumerate}
+    \item \textbf{Environment Update:} clear previous in-air signals and decay interference memory.
+    \item \textbf{FTM Ranging Phase:} non-anchor nodes range all neighbors within FTM radius.
+    \item \textbf{Node Loop:} each node performs neighbor expiry, trilateration update, gossip/heartbeat scheduling, and trust-aware routing state updates.
+    \item \textbf{Transmit Phase:} each node can emit at most one packet per tick (half-duplex TX/RX simplification).
+    \item \textbf{Receive Phase:} each listening node resolves all on-channel candidates using SNR and capture/collision logic.
+\end{enumerate}
+This strict ordering makes experiments reproducible and prevents event-order ambiguity common in asynchronous simulators.
+
+\subsection{Propagation, Noise, and Jamming Model}
+For a transmitter at distance $d$ (meters), received power is modeled with log-distance path loss:
 \begin{equation}
-    RSSI_A - RSSI_B > 6\text{dB}
+    RSSI(d) = P_{tx} - 40 - 20\log_{10}(\max(d,1))\ \text{dBm}
 \end{equation}
-This confirms that even under heavy jamming (modeled as a high-noise floor), proximate nodes can still communicate effectively, preserving local mesh integrity.
+where $P_{tx}$ defaults to 20 dBm. A receiver considers only transmitters within fixed radio radius $R_{LoRa}$.
+
+Total effective noise is:
+\begin{equation}
+    N_{tot} = N_0 + J(d,c) + I_c\cdot 20
+\end{equation}
+where $N_0$ is baseline noise floor, $J(d,c)$ is channel-specific jammer contribution, and $I_c \in [0,1]$ is per-channel interference memory. A single-link decode requires:
+\begin{equation}
+    SNR = RSSI - N_{tot} > 0
+\end{equation}
+otherwise the packet is marked jammed.
+
+\subsection{Collision and Capture Effect}
+For multiple simultaneous candidates on the same channel, we sort by RSSI and apply capture-effect decoding. Let $P_1$ and $P_2$ be strongest and second-strongest packets:
+\begin{equation}
+    \Delta = RSSI_1 - RSSI_2
+\end{equation}
+If $\Delta \geq 6$ dB, $P_1$ is decoded (status \textit{captured}) and others collide; else all collide. This mirrors practical near-far behavior in low-rate links and gives realistic partial-survival under congestion.
+
+\subsection{Localization and Topology Estimation}
+Positioning uses hybrid anchor + FTM ranging:
+\begin{enumerate}
+    \item Pairwise FTM distance measurements are simulated with Gaussian measurement noise ($\sigma\approx 0.8$m).
+    \item Nodes collect at least three confident anchor/peer references.
+    \item Position is solved by iterative damped least-squares trilateration (Gauss-Newton style).
+    \item Confidence increases with anchor count and decays through multi-hop gossip.
+\end{enumerate}
+This explicitly separates \textit{true physics coordinates} (simulator ground truth) from \textit{estimated coordinates} (what the node believes), enabling localization-error-aware routing behavior.
+
+\subsection{Routing, Gossip, and Trust Constraints}
+Routing is trust-aware geographic-gradient forwarding:
+\begin{enumerate}
+    \item direct neighbor delivery if destination is one hop away,
+    \item geographic greedy forwarding if destination position confidence is sufficient,
+    \item gradient fallback via learned \textit{via-node} from gossip,
+    \item fail if no admissible next hop exists.
+\end{enumerate}
+Gossip heartbeats carry compressed neighbor entries, allowing epidemic-style membership propagation without dedicated control floods. TTL bounds and dedup buffers constrain loop persistence.
+
+\subsection{Scalability Characteristics}
+The simulator is designed to model city-scale behavior trends, while remaining computationally tractable for browser-based experimentation:
+\begin{itemize}
+    \item \textbf{FTM phase:} naive all-pairs proximity check is $\mathcal{O}(N^2)$ per tick.
+    \item \textbf{Receive phase:} for each node, decoding cost scales with in-range on-channel contenders; worst-case dense contention approaches $\mathcal{O}(N^2)$.
+    \item \textbf{Traffic shaping:} one TX dequeue per node per tick prevents unbounded queue explosion and stabilizes runtime under burst injection.
+    \item \textbf{Memory bounds:} bounded dedup buffers, capped gossip entries, and finite event/transmission logs prevent unbounded state growth.
+\end{itemize}
+Thus, the framework is primarily a \textit{mesoscopic} simulator: suitable for robust comparative studies (protocol variants, jamming strategies, trust policies), while abstracting away waveform-level PHY details.
+
+\subsection{Validation and Robustness Test Matrix}
+We validate correctness and resilience using scenario-driven tests with observable metrics:
+\begin{itemize}
+    \item \textbf{Delivery Path Metrics:} total sent, delivered, dropped, collisions, and average hop count.
+    \item \textbf{Topology Convergence:} membership coverage (fraction of known peers) under varying beacon jitter and churn.
+    \item \textbf{Adversarial Stress:} multi-channel jammers with varying radius/power to evaluate degradation mode (jammed vs captured vs collision).
+    \item \textbf{State Robustness:} trust graph persistence across simulator resets triggered by node-set changes, ensuring configured trust edges are not lost during topology updates.
+\end{itemize}
+The trust-persistence fix is critical for experimental validity: without it, adding nodes mutates security topology unintentionally, confounding comparisons across runs.
+
+\subsection{Model Limitations (Explicit)}
+To avoid overstating claims, we explicitly note current abstractions:
+\begin{enumerate}
+    \item fixed-range cutoff rather than probabilistic reception curves,
+    \item no fading, shadowing maps, Doppler, or coding-rate/SF adaptation,
+    \item simplified half-duplex scheduling and per-tick synchronization,
+    \item simplified trust/crypto semantics for protocol experimentation.
+\end{enumerate}
+These choices intentionally prioritize reproducibility, parameter sweeps, and systems-level insight over waveform-level emulation.
 
 \section{Conclusion}
 LifeLink validates that civilian communication infrastructure can be hardened against state-level disruption. By combining the physics of LoRa propagation, the economics of cheap hardware, and the efficiency of semantic AI, we render the strategy of spectral jamming fiscally and tactically obsolete.
