@@ -113,7 +113,7 @@ function LoraIndicator({ discovered }: { discovered: boolean }) {
         [0, 1, 2].map((i) => (
           <span
             key={i}
-            className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
+            className="inline-block h-1.5 w-1.5 rounded-full bg-green-700"
           />
         ))
       ) : (
@@ -174,6 +174,7 @@ export function Messenger({
   const [quickMinBytes, setQuickMinBytes] = useState(8);
   const [quickMaxBytes, setQuickMaxBytes] = useState(32);
   const [quickTTL, setQuickTTL] = useState(5); // TTL in ticks (default 5)
+  const [quickSamplingMode, setQuickSamplingMode] = useState<"uniform" | "random">("uniform");
   const [quickSenderMode, setQuickSenderMode] = useState<"selected" | "random">(
     "selected",
   );
@@ -413,9 +414,25 @@ export function Messenger({
     }> = [];
 
     for (let i = 0; i < quickCount; i++) {
-      const offset =
-        quickMinOffset +
-        Math.floor(Math.random() * (quickMaxOffset - quickMinOffset + 1));
+      let offset: number;
+      if (quickSamplingMode === "uniform") {
+        // Distribute offsets uniformly across the selected range so messages
+        // are spaced evenly instead of clustering due to random selection.
+        if (quickCount === 1) {
+          offset = quickMinOffset;
+        } else {
+          // Compute inclusive evenly-spaced integer offsets between min and max
+          const span = quickMaxOffset - quickMinOffset;
+          offset =
+            quickMinOffset +
+            Math.round((i * span) / Math.max(1, quickCount - 1));
+        }
+      } else {
+        // Random sampling within the inclusive range
+        offset =
+          quickMinOffset +
+          Math.floor(Math.random() * (quickMaxOffset - quickMinOffset + 1));
+      }
       const op =
         quickOpChoices[Math.floor(Math.random() * quickOpChoices.length)];
 
@@ -575,20 +592,26 @@ export function Messenger({
             </div>
 
             <div className="rounded-xl border border-[var(--foreground)]/[0.06] bg-[var(--foreground)]/[0.03] p-3">
-              <div className="grid grid-cols-3 gap-2 text-[10px]">
-                <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">Count</span>
+              <div className="mb-2.5 flex items-center justify-between gap-2">
+                <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--muted)]/70">Count messages</span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 text-[10px]">
+                <label className="flex w-24 flex-col gap-1">
                   <input
                     type="number"
                     min={1}
                     max={50}
                     value={quickCount}
                     onChange={(e) => setQuickCount(parseInt(e.target.value) || 1)}
-                    className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
+                    className="h-7 w-24 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
                   />
                 </label>
+              </div>
+
+              <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">Min wait</span>
+                  <span className="text-[var(--muted)] text-[9px]">Min</span>
                   <input
                     type="number"
                     min={0}
@@ -599,7 +622,7 @@ export function Messenger({
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">Max wait</span>
+                  <span className="text-[var(--muted)] text-[9px]">Max</span>
                   <input
                     type="number"
                     min={quickMinOffset}
@@ -609,6 +632,36 @@ export function Messenger({
                     className="h-7 rounded-md border border-[var(--foreground)]/[0.08] bg-white/80 px-2 text-[11px] text-[var(--foreground)]"
                   />
                 </label>
+              </div>
+
+              <div className="mt-1 text-center">
+                <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--muted)]/70">Send delay range (ticks)</span>
+              </div>
+
+              <div className="mt-2 flex items-center gap-2 text-[10px]">
+                <span className="text-[9px] text-[var(--muted)]">Distribution</span>
+                <div className="flex items-center gap-1 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
+                  <button
+                    onClick={() => setQuickSamplingMode("uniform")}
+                    className={`rounded-full px-2 py-1 text-[10px] font-medium ${
+                      quickSamplingMode === "uniform"
+                        ? "bg-white text-[var(--foreground)]"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    Uniform
+                  </button>
+                  <button
+                    onClick={() => setQuickSamplingMode("random")}
+                    className={`rounded-full px-2 py-1 text-[10px] font-medium ${
+                      quickSamplingMode === "random"
+                        ? "bg-white text-[var(--foreground)]"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    Random
+                  </button>
+                </div>
               </div>
 
               <div className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
@@ -750,7 +803,8 @@ export function Messenger({
                     .map((msg, idx) => {
                       const node = nodes.find(n => n.id === msg.fromNodeId);
                       const dest = nodes.find(n => n.id === msg.toNodeId);
-                      const ticksUntil = msg.sendTick - (simState?.tick ?? 0);
+                      const currentTick = simState?.tick ?? 0;
+                      const ticksUntil = msg.sendTick - currentTick;
                       return (
                         <div
                           key={`queued-${idx}`}
@@ -766,10 +820,10 @@ export function Messenger({
                               <div className="truncate text-[9px] text-[var(--muted)]/70">
                                 {msg.text}
                               </div>
+                              <div className="mt-1 text-[8px] text-[var(--muted)]/50">
+                                Sends at tick {msg.sendTick} ({ticksUntil > 0 ? `in ${ticksUntil}t` : 'now'})
+                              </div>
                             </div>
-                            <span className="shrink-0 text-[9px] text-[var(--muted)]/50">
-                              T+{ticksUntil}
-                            </span>
                           </div>
                         </div>
                       );

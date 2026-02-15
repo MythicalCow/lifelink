@@ -59,14 +59,14 @@ function txColor(tx: Transmission): string {
   if (tx.radioType === "BLE") {
     return "#0ea5e9"; // bright cyan/blue
   } else {
-    // LoRa uses red shades, varying by intensity
-    // Heartbeats are darker red, Data packets are brighter red
+    // LoRa uses green shades, varying by intensity
+    // Heartbeats are darker green, Data packets are brighter green
     if (tx.packetType === PacketType.HEARTBEAT) {
-      return "#dc2626"; // medium-dark red
+      return "#16a34a"; // medium-dark green
     } else if (tx.packetType === PacketType.ACK) {
-      return "#f87171"; // lighter red
+      return "#4ade80"; // lighter green
     } else {
-      return "#ef4444"; // bright red
+      return "#22c55e"; // bright green
     }
   }
 }
@@ -152,7 +152,7 @@ export function LeafletMap({
                 <div className="flex items-center gap-2">
                   <div 
                     className="w-6 h-1 rounded-full" 
-                    style={{ backgroundColor: "#ef4444", opacity: 0.7 }}
+                    style={{ backgroundColor: "#22c55e", opacity: 0.7 }}
                   />
                   <span className="text-[10px] text-[var(--foreground)]">LoRa (long range)</span>
                 </div>
