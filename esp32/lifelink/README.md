@@ -1,104 +1,63 @@
-# LifeLink ESP32 Node
+# LifeLink Node Firmware (`esp32/lifelink`)
 
-Firmware for the LifeLink LoRa mesh node. Runs on **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262). Users connect via BLE from a phone app, send a message, and the node runs a local decision tree to classify it as vital or normal before forwarding over LoRa.
+Firmware for Heltec WiFi LoRa 32 V3 nodes.
 
-## Overview
+## Includes
 
-- **Bluetooth (BLE)**: Phone connects to the node over BLE. A 30-second timer drives periodic connection attempts when disconnected. Once connected, the node stays in standby until it receives a message; receiving a message triggers the decision tree (triage).
-- **LoRa**: SX1262 radio for mesh messaging. Vital messages are sent as compact payloads; normal messages as full ASCII.
-- **Decision tree**: Lightweight on-device classifier (vital vs normal, intent, urgency, etc.) exported from Python and run in C++ on the ESP32.
+- LoRa mesh packet handling (`HEARTBEAT`, `DATA`, `ACK`)
+- BLE control commands
+- Frequency hopping metadata
+- On-device triage classifier (`vital`, `intent`, `urgency`)
+- Per-node message history ring buffer (sent + received)
+- History fetch over BLE (`HISTCOUNT`, `HISTGET`)
 
-## Hardware
-
-- **Board**: Heltec WiFi LoRa 32 V3  
-- **MCU**: ESP32-S3  
-- **Radio**: SX1262 (915 MHz US / 868 MHz EU)  
-- **Pins** (LoRa on HSPI): NSS=8, DIO1=14, RST=12, BUSY=13, SCK=9, MISO=11, MOSI=10  
-
-## Code Layout
-
-| File | Role |
-|------|------|
-| `src/main.cpp` | Entry point: initializes LoRa node and Bluetooth, runs `tick()` for both. |
-| `src/lifelink_lora_node.h` / `.cpp` | LoRa state machine (Idle, Tx, Rx, TxDone, RxDone, timeouts, errors), SX1262 via RadioLib. |
-| `src/lifelink_bluetooth.h` / `.cpp` | BLE state machine (Disconnected, Connecting, Standby, MessageReceived), 30 s timer for connection attempts, Nordic UART-style RX characteristic; on message → decision tree hook. |
-
-## LoRa State Machine
-
-- **kIdle** → **kRx**: Start listening.
-- **kRx** → **kRxDone** (packet OK), **kRxTimeout** (no packet), or **kRxError** (e.g. CRC).
-- **kRxDone** → brief delay then **kTx**: send PING-style reply (or later: triage payload).
-- **kTx** → **kTxDone** or **kTxTimeout**; **kTxDone** / **kTxTimeout** / **kRxTimeout** / **kRxError** → back to **kRx** (or **kTx** for first PING when no peers seen).
-
-DIO1 is used as RadioLib’s operation-done interrupt.
-
-## Frequency Hopping (mesh-wide)
-
-Nodes now use a deterministic channel-hop schedule:
-
-- Heartbeat carries hop metadata: `H|<node_id>|<hb_seq>|<hop_seed_hex>|<name>`
-- Each node elects the smallest active node ID as hop leader.
-- Channel index is derived from `(leader_seed, leader_seq)` with a pseudorandom mix.
-- All nodes retune every hop interval (`~5s`) to one of 8 channels:
-  `903.9, 904.1, 904.3, 904.5, 904.7, 904.9, 905.1, 905.3 MHz`
-
-Serial log example:
-
-- `[HOP] leader=0x0780 seed=0xA2335713 seq=7 ch=7 freq=905.3`
-
-## Bluetooth State Machine
-
-- **kBtDisconnected**: BLE not connected. A timer (e.g. 30 s) triggers periodic “try connect” (start/restart advertising). No message handling.
-- **kBtConnecting**: Advertising started; waiting for a client to connect.
-- **kBtStandby**: Client connected. Waiting for the app to write a message to the BLE RX characteristic.
-- **kBtMessageReceived**: A message was received. Run the decision tree (and later: format LoRa payload and hand off to LoRa). Then return to **kBtStandby**.
-
-The 30 s period is implemented with a timer interrupt (or equivalent) that sets a flag; the main loop/tick checks the flag and, when in **kBtDisconnected**, (re)starts advertising.
-
-## Build and Flash
+## Build
 
 ```bash
-cd esp32/lifelink
+cd /home/mythicalcow/lifelink/esp32/lifelink
 pio run
-pio run -t upload
 ```
 
-Serial monitor (115200):
+## Upload
 
 ```bash
-pio device monitor
+pio run -t upload --upload-port /dev/ttyUSB0
 ```
 
-## Dependencies
+## Multi-board upload
 
-- **RadioLib** (PlatformIO `lib_deps`): SX1262 driver.
-- **ESP32 BLE** (Arduino-ESP32 built-in): `BLEDevice`, `BLEServer`, `BLECharacteristic`, etc.
+```bash
+for p in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2; do
+  pio run -t upload --upload-port "$p" || break
+done
+```
 
-## Decision Tree Integration
+## Monitor
 
-When the BLE state machine enters **kBtMessageReceived**, it has the raw text in a buffer. The intended flow is:
+```bash
+pio device monitor -p /dev/ttyUSB0 -b 115200
+```
 
-1. Encode text to the fixed feature vector (see `py_decision_tree`).
-2. Run the exported C++ decision tree to get `is_vital`, `intent`, `urgency`, etc.
-3. If vital → build compact payload and pass to LoRa for TX.
-4. If normal → pass full ASCII to LoRa for TX.
+## BLE Command API
 
-The Bluetooth module exposes a callback or inline hook (e.g. `onMessageReceived(char* msg, size_t len)`) so `main` or the LoRa node can run the tree and queue the appropriate LoRa packet. The tree code itself can live in a separate module (e.g. `lifelink_decision_tree.h` generated by `export_cpp.py`).
+Write ASCII commands to BLE RX characteristic:
 
-## BLE Bridge Command API (for test UI)
+- `WHOAMI` -> `OK|WHOAMI|<id>|<name>`
+- `STATUS` -> `OK|STATUS|<id>|<name>|<leader>|<seed>|<seq>|<ch>|<freq>`
+- `NAME|<name>` -> `OK|NAME|<name>`
+- `SEND|<dst_hex>|<text>` -> `OK|SEND|queued` or `ERR|SEND|...`
+- `HISTCOUNT` -> `OK|HISTCOUNT|<count>`
+- `HISTGET|<idx>` -> `OK|HIST|<idx>|<dir>|<peer>|<msg_id>|<vital>|<intent>|<urg>|<hex_body>`
 
-The node exposes a BLE UART interface (NUS). Write ASCII commands to RX:
+Field notes:
 
-- `WHOAMI` -> response: `OK|WHOAMI|<node_id_hex>|<node_name>`
-- `NAME|<name>` -> response: `OK|NAME|<name>`
-- `SEND|<dst_hex>|<text>` -> response: `OK|SEND|queued` or `ERR|SEND|...`
+- `<dir>`: `S` (sent) or `R` (received)
+- `<vital>`: `1` or `0`
+- `<urg>`: urgency class
+- `<hex_body>`: hex-encoded original message body
 
-`SEND` relays the message into LoRa mesh:
+## Message History Behavior
 
-1. BLE text is triaged on-device (decision tree).
-2. Vital text is compacted to wire payload.
-3. LoRa `DATA` frame is queued and flooded with dedupe + ACK handling.
-
-## References
-
-- Python pipeline and C++ export: `py_decision_tree/` (e.g. `export_cpp.py`, `train.py`, `vectorizer.py`)
+- History is stored per-node in RAM ring buffer.
+- Latest entries are retained, oldest are overwritten when full.
+- Received compact payloads are decoded to expose triage metadata.

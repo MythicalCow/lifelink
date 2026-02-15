@@ -1,61 +1,105 @@
-This is the LifeLink Next.js + Tailwind UI project.
+# LifeLink UI + BLE Gateway
 
-## Getting Started
+This is the operator UI for LifeLink. It includes:
 
-First, run the development server:
+- `Setup` tab: connect BLE nodes, set name/location, save config
+- `Map` tab: display configured nodes
+- `Messages` tab: send via BLE -> LoRa and view node-stored message history + triage metadata
+
+## Prerequisites
+
+- Node.js 20+
+- Python 3.10+
+- Bluetooth adapter enabled on host machine
+
+## 1) Install UI dependencies
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd /home/mythicalcow/lifelink/ui
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-## BLE Bridge Test Page
-
-For hardware integration testing (BLE -> LoRa relay), open:
-
-- [http://localhost:3000/bridge](http://localhost:3000/bridge)
-
-This page supports:
-
-1. Connecting to a node over BLE (through local gateway service).
-2. Reading node identity (`WHOAMI`) and setting node name (`NAME|...`).
-3. Saving nodes to a local "managed nodes" list.
-4. Sending LoRa messages via connected node (`SEND|<dst_hex>|<text>`).
-
-### Start local BLE gateway (required)
-
-The browser no longer uses Web Bluetooth directly. Start a local BLE gateway:
+## 2) Create BLE gateway venv and install Python deps (includes bleak)
 
 ```bash
-cd ui
-python3 -m pip install -r tools/requirements-ble-gateway.txt
+cd /home/mythicalcow/lifelink/ui
+python3 -m venv .venv-ble-gateway
+. .venv-ble-gateway/bin/activate
+pip install -U pip
+pip install -r tools/requirements-ble-gateway.txt
+```
+
+`tools/requirements-ble-gateway.txt` installs:
+
+- `bleak` (BLE client)
+- `fastapi`
+- `uvicorn`
+
+## 3) Start BLE gateway
+
+```bash
+cd /home/mythicalcow/lifelink/ui
 npm run gateway
 ```
 
-Then run `npm run dev` and open `/bridge`.
+Gateway endpoint: `http://127.0.0.1:8765`
 
-You can start editing pages under `src/app/`. The dev server auto-updates.
+Useful checks:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+curl -s http://127.0.0.1:8765/state
+curl -s 'http://127.0.0.1:8765/devices?timeout=3'
+```
 
-## Learn More
+## 4) Start UI app
 
-To learn more about Next.js, take a look at the following resources:
+In a second terminal:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+cd /home/mythicalcow/lifelink/ui
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Open: `http://localhost:3000`
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Clean test sequence
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. In `Setup`:
+   - Scan BLE devices
+   - Connect node
+   - Set node name + location (+ anchor if needed)
+   - Save
+   - Repeat for all nodes
+2. In `Messages`:
+   - Select receiver (`To`)
+   - Select sender device (`From`)
+   - Send message
+   - Verify node message history panel updates with triage metadata (`VITAL`, `intent`, `urgency`)
+
+---
+
+## Troubleshooting
+
+### Gateway not reachable
+
+```bash
+cd /home/mythicalcow/lifelink/ui
+pkill -9 -f 'tools/ble_gateway.py|npm run gateway|uvicorn.*8765' || true
+npm run gateway
+```
+
+### Only 1-2 devices found
+
+- Re-scan with longer timeout
+- Ensure all boards are powered and advertising
+- Keep only one gateway instance running
+
+```bash
+curl -s 'http://127.0.0.1:8765/devices?timeout=6'
+```
+
+### BLE permission issues on Linux
+
+Run with proper permissions / user in Bluetooth-related groups as needed by your distro.
