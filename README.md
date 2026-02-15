@@ -163,4 +163,4 @@ npm run dev
 
 ## License
 
-[MIT](LICENSE) — Raghav Tirumale, 2026
+[MIT](LICENSE)
