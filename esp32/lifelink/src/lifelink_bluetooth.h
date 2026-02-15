@@ -71,4 +71,6 @@ class LifeLinkBluetooth {
   bool device_connected_ = false;
   bool advertising_started_ = false;
   unsigned long last_adv_restart_ms_ = 0;
+  unsigned long last_ble_activity_ms_ = 0;
+  static constexpr unsigned long kBleInactivityTimeoutMs = 8000; // Force-disconnect stale clients
 };

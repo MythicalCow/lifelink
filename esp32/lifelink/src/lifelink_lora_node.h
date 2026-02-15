@@ -92,7 +92,8 @@ class LifeLinkLoRaNode {
   static constexpr unsigned long kHeartbeatJitterMs = 1500;
   static constexpr unsigned long kMembershipTimeoutMs = 15000;
   static constexpr unsigned long kTestDataIntervalMs = 12000;
-  static constexpr unsigned long kAckTimeoutMs = 12000;
+  static constexpr unsigned long kAckTimeoutMs = 2500;
+  static constexpr uint8_t kMaxDataRetries = 3;
   static constexpr uint8_t kDefaultTtl = 4;
   static constexpr size_t kMaxGossipEntries = 12;    // blast full membership in every heartbeat
   static constexpr size_t kMaxMembers = 24;
@@ -140,6 +141,8 @@ class LifeLinkLoRaNode {
     uint16_t msg_id;
     uint16_t dst;
     uint32_t sent_at_ms;
+    uint8_t attempts;
+    char body[52];
     bool acked;
     bool used;
   };
@@ -174,7 +177,7 @@ class LifeLinkLoRaNode {
   size_t collectActivePeers(uint16_t* out_peers, size_t max_out) const;
   bool hasSeenAndRemember(PacketType type, uint16_t origin, uint16_t msg_id);
   void markLocalMessageSeen(PacketType type, uint16_t origin, uint16_t msg_id);
-  void addPendingData(uint16_t msg_id, uint16_t dst);
+  void addPendingData(uint16_t msg_id, uint16_t dst, const char* body);
   void ackPendingData(uint16_t msg_id, uint16_t from);
   void expirePendingData();
   void printMembership() const;

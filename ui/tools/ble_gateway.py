@@ -30,6 +30,13 @@ NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 KNOWN_ESP32_OUI_PREFIXES = ("3C:0F:02",)
 DEVICE_CACHE_TTL_S = 180.0
 
+# BLE response timeouts tuned for real-world ESP32 latency
+# First BLE command after connect can take 1-2s (connection interval warmup)
+# Subsequent commands are typically <200ms
+BLE_TIMEOUT_FIRST = 2.0    # first command right after connect
+BLE_TIMEOUT_NORMAL = 0.8   # normal command timeouts
+BLE_TIMEOUT_FAST = 0.5     # fast simple lookups (HISTGET etc. after warm link)
+
 
 @dataclass
 class GatewayState:
@@ -63,8 +70,10 @@ class BleGateway:
     self._logs: deque[str] = deque(maxlen=300)
     self._lock = asyncio.Lock()
     self._response_event = asyncio.Event()
-    self._identity_task: asyncio.Task[None] | None = None
     self._recent_devices: dict[str, tuple[dict[str, Any], float]] = {}
+    self._message_cache: list[dict[str, Any]] = []
+    self._message_cache_count: int = 0
+    self._member_cache: list[dict[str, Any]] = []
 
   def _log(self, line: str) -> None:
     ts = time.strftime("%H:%M:%S")
@@ -107,7 +116,6 @@ class BleGateway:
           pass
 
   async def scan(self, timeout: float = 2.2) -> list[dict[str, Any]]:
-    # Two short scans + short-term cache gives much more stable multi-node discovery.
     rounds = max(1, min(3, int(timeout // 1) + 1))
     per_round = max(0.6, min(1.2, timeout / rounds))
     for _ in range(rounds):
@@ -130,7 +138,6 @@ class BleGateway:
       await asyncio.sleep(0.05)
 
     now = time.time()
-    # Keep recently seen devices for a short window to avoid flicker from missed advert intervals.
     fresh: list[dict[str, Any]] = []
     for addr, (entry, seen_at) in list(self._recent_devices.items()):
       if now - seen_at <= DEVICE_CACHE_TTL_S:
@@ -138,8 +145,6 @@ class BleGateway:
       else:
         del self._recent_devices[addr]
 
-    # A connected BLE peripheral may stop advertising, so it can disappear from scanner results.
-    # Keep it visible in the device list while connected to avoid the "only 2 nodes" UX.
     if self._state.connected and self._state.ble_address:
       connected_addr = self._state.ble_address
       if not any((d.get("address") or "").upper() == connected_addr.upper() for d in fresh):
@@ -166,11 +171,23 @@ class BleGateway:
       ):
         self._log(f"Already connected to {address}.")
         return
-      await self.disconnect()
+
+      # Non-blocking disconnect of previous connection
+      await self._disconnect_inner_fast()
+      # Brief pause to let BlueZ finish tearing down the old connection
+      await asyncio.sleep(0.3)
+
       self._log(f"Connecting to {address}...")
-      client = BleakClient(address, disconnected_callback=self._on_disconnect)
+
+      # On Linux/BlueZ, BleakClient(address_str) can fail if the device isn't
+      # in the adapter cache. Use find_device_by_address to resolve first.
+      device = await BleakScanner.find_device_by_address(address, timeout=2.0)
+      if device is None:
+        raise RuntimeError(f"Device {address} not found. Try scanning first.")
+
+      client = BleakClient(device, disconnected_callback=self._on_disconnect)
       try:
-        await asyncio.wait_for(client.connect(timeout=4.0), timeout=5.0)
+        await asyncio.wait_for(client.connect(timeout=3.0), timeout=4.0)
         svcs = await client.get_services()
         rx = svcs.get_characteristic(NUS_RX_UUID)
         tx = svcs.get_characteristic(NUS_TX_UUID)
@@ -185,6 +202,9 @@ class BleGateway:
         self._state.ble_address = address
         self._state.ble_name = client.address
         self._state.last_response = ""
+        self._message_cache = []
+        self._message_cache_count = 0
+        self._member_cache = []
         self._recent_devices[address] = (
             {
                 "name": "LifeLink",
@@ -194,102 +214,122 @@ class BleGateway:
             time.time(),
         )
         self._log("BLE connected.")
-        # Fetch identity in background so /connect returns quickly.
-        if self._identity_task is not None and not self._identity_task.done():
-          self._identity_task.cancel()
-        self._identity_task = asyncio.create_task(self._refresh_identity())
+
+        # Fetch identity inline — use generous timeout for first command after BLE connect
+        try:
+          await self._send_and_wait_locked("WHOAMI", ("OK|WHOAMI|",), timeout=BLE_TIMEOUT_FIRST, attempts=1)
+        except Exception:
+          pass
+        # STATUS populates hop info; it's the 2nd command so should be fast
+        try:
+          await self._send_and_wait_locked("STATUS", ("OK|STATUS|",), timeout=BLE_TIMEOUT_NORMAL, attempts=1)
+        except Exception:
+          pass
+
       except Exception:
-        await self.disconnect()
+        await self._disconnect_inner_fast()
         raise
 
-  async def disconnect(self) -> None:
+  async def _disconnect_inner_fast(self) -> None:
+    """Quick disconnect — doesn't wait for BLE teardown."""
     if self._client is None:
-      self._state.connected = False
+      self._state = GatewayState()
+      self._message_cache = []
+      self._message_cache_count = 0
+      self._member_cache = []
       return
-    try:
-      if self._tx_char is not None:
-        await self._client.stop_notify(self._tx_char)
-    except Exception:
-      pass
-    try:
-      await self._client.disconnect()
-    except Exception:
-      pass
+
+    client = self._client
+    tx_char = self._tx_char
     self._client = None
     self._rx_char = None
     self._tx_char = None
-    self._state.connected = False
-    self._state.ble_name = ""
-    self._state.ble_address = ""
-    self._state.node_id = ""
-    self._state.node_name = ""
-    self._state.hop_leader = ""
-    self._state.hop_seed = ""
-    self._state.hop_seq = 0
-    self._state.hop_channel = 0
-    self._state.hop_frequency_mhz = 0.0
-    self._state.last_response = ""
-    self._log("BLE disconnected (manual).")
-    if self._identity_task is not None and not self._identity_task.done():
-      self._identity_task.cancel()
+    self._state = GatewayState()
+    self._message_cache = []
+    self._message_cache_count = 0
+    self._member_cache = []
+    self._log("BLE disconnecting...")
+
+    # Fire-and-forget BLE teardown in background
+    async def _teardown() -> None:
+      try:
+        if tx_char is not None:
+          await client.stop_notify(tx_char)
+      except Exception:
+        pass
+      try:
+        await client.disconnect()
+      except Exception:
+        pass
+
+    asyncio.create_task(_teardown())
+
+  async def disconnect(self) -> None:
+    async with self._lock:
+      await self._disconnect_inner_fast()
 
   async def send_command(self, command: str) -> None:
     async with self._lock:
       if self._client is None or not self._client.is_connected or self._rx_char is None:
         raise RuntimeError("No BLE device connected.")
       expected_prefixes: tuple[str, ...] = ()
-      timeout_s = 1.0
+      timeout_s = BLE_TIMEOUT_NORMAL
       attempts = 2
       if command == "WHOAMI":
         expected_prefixes = ("OK|WHOAMI|",)
-        timeout_s = 1.4
-        attempts = 3
       elif command == "STATUS":
         expected_prefixes = ("OK|STATUS|",)
-        timeout_s = 1.6
-        attempts = 4
       elif command.startswith("NAME|"):
         expected_prefixes = ("OK|NAME|",)
-        timeout_s = 1.4
-        attempts = 3
       elif command.startswith("SEND|"):
         expected_prefixes = ("OK|SEND|", "ERR|SEND|")
-        timeout_s = 1.4
-        attempts = 3
       elif command == "HISTCOUNT":
         expected_prefixes = ("OK|HISTCOUNT|",)
-        timeout_s = 1.6
-        attempts = 3
       elif command.startswith("HISTGET|"):
         expected_prefixes = ("OK|HIST|", "ERR|HIST|")
-        timeout_s = 1.6
-        attempts = 3
       elif command == "MEMCOUNT":
         expected_prefixes = ("OK|MEMCOUNT|",)
-        timeout_s = 1.6
-        attempts = 3
       elif command.startswith("MEMGET|"):
         expected_prefixes = ("OK|MEM|", "ERR|MEM|")
-        timeout_s = 1.6
-        attempts = 3
       await self._send_and_wait_locked(command, expected_prefixes, timeout=timeout_s, attempts=attempts)
 
   async def fetch_messages(self, limit: int = 40) -> list[dict[str, Any]]:
+    # NON-BLOCKING: if someone else holds the lock, return cached data instantly
+    if self._lock.locked():
+      clipped = max(1, min(limit, 200))
+      return self._message_cache[-clipped:]
+
     async with self._lock:
       if self._client is None or not self._client.is_connected or self._rx_char is None:
-        raise RuntimeError("No BLE device connected.")
-      await self._send_and_wait_locked("HISTCOUNT", ("OK|HISTCOUNT|",), timeout=1.6, attempts=3)
+        return self._message_cache[:]
+
+      try:
+        await self._send_and_wait_locked("HISTCOUNT", ("OK|HISTCOUNT|",), timeout=BLE_TIMEOUT_NORMAL, attempts=2)
+      except Exception:
+        return self._message_cache[:]
+
       parts = self._state.last_response.split("|")
       if len(parts) < 3:
-        return []
+        return self._message_cache[:]
       try:
         count = int(parts[2])
       except ValueError:
+        return self._message_cache[:]
+
+      if count <= 0:
+        self._message_cache = []
+        self._message_cache_count = 0
         return []
-      start = max(0, count - max(1, min(limit, 200)))
-      out: list[dict[str, Any]] = []
-      for idx in range(start, count):
-        await self._send_and_wait_locked(f"HISTGET|{idx}", ("OK|HIST|",), timeout=1.6, attempts=3)
+
+      if count < self._message_cache_count:
+        self._message_cache = []
+        self._message_cache_count = 0
+
+      for idx in range(self._message_cache_count, count):
+        try:
+          await self._send_and_wait_locked(f"HISTGET|{idx}", ("OK|HIST|",), timeout=BLE_TIMEOUT_FAST, attempts=2)
+        except Exception:
+          break
         row = self._state.last_response.split("|")
         # OK|HIST|idx|dir|peer|msg|vital|intent|urg|hexbody
         if len(row) < 10:
@@ -299,7 +339,7 @@ class BleGateway:
           body = bytes.fromhex(hex_body).decode("utf-8", errors="replace")
         except ValueError:
           body = ""
-        out.append(
+        self._message_cache.append(
             {
                 "idx": int(row[2]),
                 "direction": row[3],
@@ -311,24 +351,39 @@ class BleGateway:
                 "body": body,
             }
         )
-      return out
+      self._message_cache_count = count
+      clipped_limit = max(1, min(limit, 200))
+      return self._message_cache[-clipped_limit:]
 
   async def fetch_members(self, limit: int = 40) -> list[dict[str, Any]]:
+    # NON-BLOCKING: return cached if lock is busy
+    if self._lock.locked():
+      return self._member_cache[:]
+
     async with self._lock:
       if self._client is None or not self._client.is_connected or self._rx_char is None:
-        raise RuntimeError("No BLE device connected.")
-      await self._send_and_wait_locked("MEMCOUNT", ("OK|MEMCOUNT|",), timeout=1.6, attempts=3)
+        return self._member_cache[:]
+
+      try:
+        await self._send_and_wait_locked("MEMCOUNT", ("OK|MEMCOUNT|",), timeout=BLE_TIMEOUT_NORMAL, attempts=2)
+      except Exception:
+        return self._member_cache[:]
+
       parts = self._state.last_response.split("|")
       if len(parts) < 3:
-        return []
+        return self._member_cache[:]
       try:
         count = int(parts[2])
       except ValueError:
-        return []
+        return self._member_cache[:]
+
       start = max(0, count - max(1, min(limit, 200)))
       out: list[dict[str, Any]] = []
       for idx in range(start, count):
-        await self._send_and_wait_locked(f"MEMGET|{idx}", ("OK|MEM|",), timeout=1.6, attempts=3)
+        try:
+          await self._send_and_wait_locked(f"MEMGET|{idx}", ("OK|MEM|",), timeout=BLE_TIMEOUT_FAST, attempts=2)
+        except Exception:
+          break
         row = self._state.last_response.split("|")
         # OK|MEM|idx|node_id|name|age_ms|hb_seq|seed|hops_away
         if len(row) < 8:
@@ -344,6 +399,7 @@ class BleGateway:
                 "hops_away": int(row[8]) if len(row) > 8 else 1,
             }
         )
+      self._member_cache = out
       return out
 
   async def _send_and_wait_locked(
@@ -360,7 +416,7 @@ class BleGateway:
       self._response_event.clear()
       self._log(f"TX: {command}")
       payload = command.encode("utf-8")
-      await asyncio.wait_for(self._client.write_gatt_char(self._rx_char, payload, response=False), timeout=3.0)
+      await asyncio.wait_for(self._client.write_gatt_char(self._rx_char, payload, response=False), timeout=1.5)
       if not expected_prefixes:
         return
       try:
@@ -374,23 +430,7 @@ class BleGateway:
         return
       if attempt + 1 == attempts:
         raise RuntimeError(f"Unexpected response '{self._state.last_response}' for '{command}'")
-      await asyncio.sleep(0.03)
-
-  async def _refresh_identity(self) -> None:
-    await asyncio.sleep(0.02)
-    try:
-      async with self._lock:
-        if self._client is None or not self._client.is_connected:
-          return
-        try:
-          await self._send_and_wait_locked("STATUS", ("OK|STATUS|",), timeout=0.7, attempts=2)
-        except Exception:
-          await self._send_and_wait_locked("WHOAMI", ("OK|WHOAMI|",), timeout=0.7, attempts=2)
-    except asyncio.CancelledError:
-      return
-    except Exception as exc:
-      self._log(f"Identity warmup failed: {exc}")
-      return
+      await asyncio.sleep(0.02)
 
   def state(self) -> dict[str, Any]:
     return asdict(self._state)

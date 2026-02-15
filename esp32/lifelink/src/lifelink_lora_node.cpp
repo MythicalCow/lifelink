@@ -550,7 +550,7 @@ bool LifeLinkLoRaNode::queueBleMessage(uint16_t dst, const char* text) {
 
   if (!enqueueFrame(frame)) return false;
 
-  addPendingData(msg_id, dst);
+  addPendingData(msg_id, dst, body_text.c_str());
   appendHistory('S', dst, msg_id, body_text.c_str(), &triage);
   Serial.printf("[BLE->LORA] msg=%u -> 0x%04X vital=%s intent=%s urg=%u\n",
       msg_id, dst, triage.is_vital ? "Y" : "N",
@@ -589,7 +589,7 @@ void LifeLinkLoRaNode::sendTestDataIfPossible() {
   snprintf(frame, sizeof(frame), "D|%04X|%04X|%04X|%u|%u|%u|%s",
       node_id_, node_id_, dst, msg_id, kDefaultTtl, 0, body_text.c_str());
   if (enqueueFrame(frame)) {
-    addPendingData(msg_id, dst);
+    addPendingData(msg_id, dst, body_text.c_str());
     appendHistory('S', dst, msg_id, body_text.c_str(), &triage);
     Serial.printf("[AI] DATA msg=%u -> 0x%04X vital=%s intent=%s urg=%u\n",
         msg_id, dst, triage.is_vital ? "Y" : "N",
@@ -911,11 +911,18 @@ void LifeLinkLoRaNode::markLocalMessageSeen(PacketType type, uint16_t origin, ui
   (void)hasSeenAndRemember(type, origin, msg_id);
 }
 
-void LifeLinkLoRaNode::addPendingData(uint16_t msg_id, uint16_t dst) {
+void LifeLinkLoRaNode::addPendingData(uint16_t msg_id, uint16_t dst, const char* body) {
   const uint32_t now = millis();
   for (size_t i = 0; i < kMaxPendingData; ++i) {
     if (!pending_data_[i].used) {
-      pending_data_[i] = {msg_id, dst, now, false, true};
+      pending_data_[i].msg_id = msg_id;
+      pending_data_[i].dst = dst;
+      pending_data_[i].sent_at_ms = now;
+      pending_data_[i].attempts = 1;
+      strncpy(pending_data_[i].body, (body != nullptr) ? body : "", sizeof(pending_data_[i].body) - 1);
+      pending_data_[i].body[sizeof(pending_data_[i].body) - 1] = '\0';
+      pending_data_[i].acked = false;
+      pending_data_[i].used = true;
       return;
     }
   }
@@ -938,8 +945,26 @@ void LifeLinkLoRaNode::expirePendingData() {
   for (size_t i = 0; i < kMaxPendingData; ++i) {
     if (!pending_data_[i].used || pending_data_[i].acked) continue;
     if (now - pending_data_[i].sent_at_ms > kAckTimeoutMs) {
-      Serial.printf("[TIMEOUT] msg=%u to 0x%04X\n", pending_data_[i].msg_id, pending_data_[i].dst);
-      pending_data_[i].used = false;
+      if (pending_data_[i].attempts >= kMaxDataRetries) {
+        Serial.printf("[TIMEOUT] msg=%u to 0x%04X after %u attempts\n",
+            pending_data_[i].msg_id, pending_data_[i].dst,
+            static_cast<unsigned>(pending_data_[i].attempts));
+        pending_data_[i].used = false;
+        continue;
+      }
+
+      char frame[kBufferSize];
+      snprintf(frame, sizeof(frame), "D|%04X|%04X|%04X|%u|%u|%u|%s",
+          node_id_, node_id_, pending_data_[i].dst,
+          pending_data_[i].msg_id, kDefaultTtl, 0, pending_data_[i].body);
+
+      if (enqueueFrame(frame)) {
+        pending_data_[i].sent_at_ms = now;
+        ++pending_data_[i].attempts;
+        Serial.printf("[RETRY] msg=%u to 0x%04X attempt=%u\n",
+            pending_data_[i].msg_id, pending_data_[i].dst,
+            static_cast<unsigned>(pending_data_[i].attempts));
+      }
     }
   }
 }

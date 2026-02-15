@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+} from "react";
 import type { SensorNode } from "@/types/sensor";
 import type {
   GatewayDevice,
@@ -16,7 +24,7 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
   direction: "sent" | "received";
-  status: "sending" | "routing" | "delivered" | "failed";
+  status: "queued" | "sent" | "failed";
   vital?: boolean;
   intent?: string;
   urgency?: number;
@@ -37,7 +45,6 @@ interface MessengerProps {
   onGatewayConnect: (address: string) => Promise<void>;
   onGatewayDisconnect: () => Promise<void>;
   onGatewayCommand: (command: string) => Promise<void>;
-  onGatewayFetchMembers: () => Promise<GatewayMember[]>;
 }
 
 function toHex(nodeIdNum: number): string {
@@ -63,7 +70,6 @@ export function Messenger({
   onGatewayConnect,
   onGatewayDisconnect,
   onGatewayCommand,
-  onGatewayFetchMembers,
 }: MessengerProps) {
   const [selectedAddress, setSelectedAddress] = useState("");
   const [selectedReceiverHex, setSelectedReceiverHex] = useState("");
@@ -89,12 +95,9 @@ export function Messenger({
     [hardwareNodes],
   );
 
-  /* Receiver list comes from the connected node's mesh membership table. */
+  /* Receiver list: mesh members excluding the connected node itself. */
   const receiverMembers = useMemo(
-    () =>
-      gatewayMembers.filter(
-        (m) => m.node_id.toUpperCase() !== connectedSenderHex,
-      ),
+    () => gatewayMembers.filter((m) => m.node_id.toUpperCase() !== connectedSenderHex),
     [connectedSenderHex, gatewayMembers],
   );
 
@@ -106,45 +109,97 @@ export function Messenger({
     return `0x${hex}`;
   };
 
-  /* ── Merge hardware history into the unified chat list ── */
-  // Track which hardware history entries we've already ingested (by msg_id + direction)
+  /* ── Merge hardware history → chat ──
+   *
+   * ingestedRef tracks which hardware history entries have already been
+   * merged into the chat. It must be reset whenever connectedSenderHex
+   * changes — INCLUDING when it transitions through "" and back to the
+   * same value (Bug 6: E504 → "" → E504 didn't clear, leaving an empty
+   * chat on reconnect to the same node).
+   *
+   * Fix: unconditionally reset on every connectedSenderHex change.
+   * No guards. No activeNodeRef equality check.
+   */
   const ingestedRef = useRef(new Set<string>());
 
+  // Reset on EVERY connectedSenderHex change — no guards, no skipping.
   useEffect(() => {
-    if (gatewayMessageHistory.length === 0 || !connectedSenderHex) return;
+    ingestedRef.current = new Set<string>();
+    setMessages([]);
+    setSelectedReceiverHex("");
+  }, [connectedSenderHex, setMessages]);
 
-    const newMessages: ChatMessage[] = [];
-    for (const h of gatewayMessageHistory) {
-      const key = `hw-${h.direction}-${h.peer}-${h.msg_id}`;
-      if (ingestedRef.current.has(key)) continue;
-      ingestedRef.current.add(key);
+  // Ingest hardware message history into the chat list.
+  useEffect(() => {
+    if (!connectedSenderHex || gatewayMessageHistory.length === 0) return;
 
-      const isSent = h.direction === "S";
-      const peerHex = h.peer.toUpperCase();
-      newMessages.push({
-        id: key,
-        fromNodeId: isSent ? parseInt(connectedSenderHex, 16) : parseInt(peerHex, 16),
-        toNodeId: isSent ? parseInt(peerHex, 16) : parseInt(connectedSenderHex, 16),
-        text: h.body,
-        timestamp: Date.now(),
-        direction: isSent ? "sent" : "received",
-        status: "delivered",
-        vital: h.vital,
-        intent: h.intent,
-        urgency: h.urgency,
-      });
-    }
-    if (newMessages.length > 0) {
-      setMessages((prev) => [...prev, ...newMessages]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gatewayMessageHistory, connectedSenderHex]);
+    setMessages((prev) => {
+      let next = prev;
+      const now = Date.now();
 
-  // Auto-scroll to bottom on new messages
+      for (const h of gatewayMessageHistory) {
+        const peerHex = h.peer.toUpperCase();
+        const isSent = h.direction === "S";
+        const key = `hw-${connectedSenderHex}-${h.direction}-${peerHex}-${h.msg_id}`;
+
+        if (ingestedRef.current.has(key)) continue;
+        ingestedRef.current.add(key);
+
+        const fromNodeId = isSent ? parseInt(connectedSenderHex, 16) : parseInt(peerHex, 16);
+        const toNodeId = isSent ? parseInt(peerHex, 16) : parseInt(connectedSenderHex, 16);
+
+        // Bug 4 fix: match optimistic sends on body text too, not just
+        // sender/receiver/time. Without this, two quick sends to the same
+        // peer get cross-matched and produce wrong vital/urgency metadata.
+        if (isSent) {
+          const optIdx = next.findIndex(
+            (m) =>
+              m.id.startsWith("msg-") &&
+              m.direction === "sent" &&
+              m.fromNodeId === fromNodeId &&
+              m.toNodeId === toNodeId &&
+              m.text === h.body &&
+              now - m.timestamp < 120_000,
+          );
+          if (optIdx >= 0) {
+            if (next === prev) next = [...prev];
+            next[optIdx] = {
+              ...next[optIdx],
+              id: key,
+              status: "sent",
+              vital: h.vital,
+              intent: h.intent,
+              urgency: h.urgency,
+            };
+            continue;
+          }
+        }
+
+        if (next.some((m) => m.id === key)) continue;
+        if (next === prev) next = [...prev];
+        next.push({
+          id: key,
+          fromNodeId,
+          toNodeId,
+          text: h.body,
+          timestamp: now,
+          direction: isSent ? "sent" : "received",
+          status: "sent",
+          vital: h.vital,
+          intent: h.intent,
+          urgency: h.urgency,
+        });
+      }
+      return next;
+    });
+  }, [gatewayMessageHistory, connectedSenderHex, setMessages]);
+
+  // Auto-scroll
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
+  /* ── Derived ── */
   const canSend = Boolean(
     gatewayOnline &&
       gatewayState.connected &&
@@ -154,6 +209,7 @@ export function Messenger({
       !busy,
   );
 
+  /* ── Handlers ── */
   const handleScan = async () => {
     setError("");
     try {
@@ -173,8 +229,6 @@ export function Messenger({
     setError("");
     try {
       await onGatewayConnect(target);
-      await onGatewayCommand("WHOAMI");
-      await onGatewayFetchMembers();
       setSelectedAddress(target);
     } catch (err) {
       setError(String(err));
@@ -190,7 +244,6 @@ export function Messenger({
     const fromNum = parseInt(connectedSenderHex, 16) || 0;
     const toNum = parseInt(selectedReceiverHex, 16) || 0;
 
-    // Instantly add to chat and clear draft
     setMessages((prev) => [
       ...prev,
       {
@@ -200,7 +253,7 @@ export function Messenger({
         text,
         timestamp: Date.now(),
         direction: "sent",
-        status: "routing",
+        status: "queued",
       },
     ]);
     setDraft("");
@@ -208,10 +261,11 @@ export function Messenger({
     setError("");
 
     try {
-      // Single command — no STATUS, no fetchMessages. Polling handles the rest.
       await onGatewayCommand(`SEND|${selectedReceiverHex}|${text}`);
+      // Bug 5: ESP32 accepted the message into its TX queue. This does NOT
+      // mean the destination received it. Label as "sent" (not "delivered").
       setMessages((prev) =>
-        prev.map((m) => (m.id === messageId ? { ...m, status: "delivered" } : m)),
+        prev.map((m) => (m.id === messageId ? { ...m, status: "sent" } : m)),
       );
     } catch (err) {
       setMessages((prev) =>
@@ -223,6 +277,7 @@ export function Messenger({
     }
   };
 
+  /* ── Render ── */
   return (
     <div className="absolute inset-0 top-16 bottom-10 z-[500] flex flex-col">
       {/* ── Connection / Receiver bar ── */}
@@ -244,61 +299,27 @@ export function Messenger({
           </div>
 
           <div className="text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
-            To
-          </div>
-          <div className="mt-1 flex flex-wrap gap-2">
-            {receiverMembers.map((m) => {
-              const hex = m.node_id.toUpperCase();
-              const active = selectedReceiverHex === hex;
-              const label = m.name || `0x${hex}`;
-              return (
-                <button
-                  key={`rx-${hex}`}
-                  onClick={() => setSelectedReceiverHex(hex)}
-                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition-colors ${
-                    active
-                      ? "bg-[var(--accent)] text-white ring-[var(--accent)]"
-                      : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
-                  }`}
-                >
-                  {label}
-                  {m.hops_away > 0 && (
-                    <span className="ml-1 text-[9px] opacity-60">
-                      {m.hops_away}h
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-            {receiverMembers.length === 0 && (
-              <div className="text-[11px] text-[var(--muted)]">
-                {gatewayState.connected ? "No mesh peers yet" : "Connect a sender to see mesh peers"}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-3 text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
             From
           </div>
           <div className="mt-1 flex flex-wrap gap-2">
             {gatewayDevices.map((d) => {
-              const upperAddress = d.address.toUpperCase();
-              const node = nodeByAddress.get(upperAddress);
-              const isConnectedSender =
-                gatewayState.connected && gatewayState.ble_address.toUpperCase() === upperAddress;
+              const upperAddr = d.address.toUpperCase();
+              const node = nodeByAddress.get(upperAddr);
+              const isActive =
+                gatewayState.connected && gatewayState.ble_address.toUpperCase() === upperAddr;
               return (
                 <button
-                  key={`sender-${d.address}`}
+                  key={`from-${d.address}`}
                   disabled={!gatewayOnline || busy}
                   onClick={() => {
-                    if (isConnectedSender) {
+                    if (isActive) {
                       void onGatewayDisconnect();
                       return;
                     }
                     void handleConnect(d.address);
                   }}
                   className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition-colors disabled:opacity-40 ${
-                    isConnectedSender
+                    isActive
                       ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30"
                       : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
                   }`}
@@ -311,10 +332,42 @@ export function Messenger({
               <div className="text-[11px] text-[var(--muted)]">No senders — hit Scan</div>
             )}
           </div>
+
+          <div className="mt-3 text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
+            To
+          </div>
+          <div className="mt-1 flex flex-wrap gap-2">
+            {receiverMembers.map((m) => {
+              const hex = m.node_id.toUpperCase();
+              const active = selectedReceiverHex === hex;
+              const label = m.name || `0x${hex}`;
+              return (
+                <button
+                  key={`to-${hex}`}
+                  onClick={() => setSelectedReceiverHex(hex)}
+                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition-colors ${
+                    active
+                      ? "bg-[var(--accent)] text-white ring-[var(--accent)]"
+                      : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
+                  }`}
+                >
+                  {label}
+                  {m.hops_away > 0 && (
+                    <span className="ml-1 text-[9px] opacity-60">{m.hops_away}h</span>
+                  )}
+                </button>
+              );
+            })}
+            {receiverMembers.length === 0 && (
+              <div className="text-[11px] text-[var(--muted)]">
+                {gatewayState.connected ? "No mesh peers yet" : "Connect a sender to see mesh peers"}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* ── Unified chat window ── */}
+      {/* ── Chat ── */}
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col overflow-hidden px-4">
         <div className="flex-1 overflow-y-auto rounded-xl bg-[var(--foreground)]/[0.02] p-3">
           {messages.length === 0 ? (
@@ -335,12 +388,18 @@ export function Messenger({
                     }`}
                   >
                     <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
-                      <span className={`rounded px-1.5 py-0.5 font-medium ${
-                        isSent ? "bg-blue-500/10 text-blue-700" : "bg-emerald-500/10 text-emerald-700"
-                      }`}>
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-medium ${
+                          isSent
+                            ? "bg-blue-500/10 text-blue-700"
+                            : "bg-emerald-500/10 text-emerald-700"
+                        }`}
+                      >
                         {isSent ? "Sent" : "Recv"}
                       </span>
-                      <span>{resolveNodeLabel(fromHex)} → {resolveNodeLabel(toHex_)}</span>
+                      <span>
+                        {resolveNodeLabel(fromHex)} → {resolveNodeLabel(toHex_)}
+                      </span>
                       {msg.vital && (
                         <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-semibold text-red-600">
                           VITAL {msg.intent} U{msg.urgency}
@@ -350,14 +409,14 @@ export function Messenger({
                     <div className="mt-1 text-[13px] text-[var(--foreground)]">{msg.text}</div>
                     <div
                       className={`mt-0.5 text-[10px] ${
-                        msg.status === "delivered"
+                        msg.status === "sent"
                           ? "text-green-600"
                           : msg.status === "failed"
                             ? "text-red-600"
                             : "text-[var(--muted)]"
                       }`}
                     >
-                      {msg.status === "routing" ? "sending…" : msg.status}
+                      {msg.status === "queued" ? "sending…" : msg.status === "sent" ? "sent ✓" : msg.status}
                     </div>
                   </div>
                 );

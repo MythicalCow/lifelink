@@ -115,6 +115,7 @@ bool LifeLinkBluetooth::sendText(const char* text) {
   if (!device_connected_ || tx_characteristic_ == nullptr || text == nullptr) {
     return false;
   }
+  last_ble_activity_ms_ = millis();
   tx_characteristic_->setValue(reinterpret_cast<uint8_t*>(const_cast<char*>(text)), strlen(text));
   tx_characteristic_->notify();
   return true;
@@ -131,6 +132,7 @@ void LifeLinkBluetooth::startAdvertising() {
 void LifeLinkBluetooth::onClientConnect() {
   device_connected_ = true;
   advertising_started_ = false;
+  last_ble_activity_ms_ = millis();
   state_ = BtState::kStandby;
   Serial.println("[BT] Client connected; standby for message.");
 }
@@ -146,6 +148,7 @@ void LifeLinkBluetooth::onClientDisconnect() {
 }
 
 void LifeLinkBluetooth::onMessageWritten(const uint8_t* data, size_t len) {
+  last_ble_activity_ms_ = millis();
   if (len == 0)
     return;
   if (len > kMessageBufferSize - 1)
@@ -182,8 +185,21 @@ void LifeLinkBluetooth::runStateConnecting() {
 }
 
 void LifeLinkBluetooth::runStateStandby() {
-  // Connected; nothing to do until onMessageWritten sets MessageReceived.
-  // No delay—return immediately so LoRa RX is not blocked.
+  // Detect stale connections (e.g., gateway process killed without graceful disconnect).
+  // If no BLE activity for kBleInactivityTimeoutMs, force-disconnect and re-advertise.
+  const unsigned long now = millis();
+  if (now - last_ble_activity_ms_ >= kBleInactivityTimeoutMs) {
+    Serial.println("[BT] Stale connection detected — forcing disconnect.");
+    device_connected_ = false;
+    advertising_started_ = false;
+    // Tell BLE stack to drop the connection
+    if (ble_server_ != nullptr) {
+      ble_server_->disconnect(ble_server_->getConnId());
+    }
+    startAdvertising();
+    last_adv_restart_ms_ = now;
+    state_ = BtState::kConnecting;
+  }
 }
 
 void LifeLinkBluetooth::runStateMessageReceived() {

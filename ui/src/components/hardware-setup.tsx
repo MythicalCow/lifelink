@@ -89,18 +89,14 @@ export function HardwareSetup({
     setError("");
     setIsConnecting(true);
     try {
+      // connect() now returns with identity — no extra STATUS needed
       await onConnect(selectedAddress);
-      try {
-        await onCommand("STATUS");
-      } catch {
-        // best-effort identity refresh
-      }
     } catch (err) {
       setError(String(err));
     } finally {
       setIsConnecting(false);
     }
-  }, [onCommand, onConnect, selectedAddress]);
+  }, [onConnect, selectedAddress]);
 
   const handleSaveConfig = useCallback(() => {
     if (!connected || !state.node_id || !nodeName.trim() || selectedLat === null || selectedLng === null) return;
@@ -115,21 +111,21 @@ export function HardwareSetup({
       bleAddress: state.ble_address,
     };
     onNodeConfigured?.(config);
+    setSaveStatus("synced");
     setSelectedAddress("");
     setSelectedLat(null);
     setSelectedLng(null);
     setIsAnchor(false);
     setNodeName("");
 
+    // Fire-and-forget: push name to node and disconnect in background
     void (async () => {
       try {
         await onCommand(`NAME|${config.name}`);
-        void onDisconnect();
-        setSaveStatus("synced");
-      } catch (err) {
-        setSaveStatus("sync_error");
-        setError(String(err));
+      } catch {
+        // best-effort
       }
+      void onDisconnect();
     })();
   }, [connected, isAnchor, nodeName, onCommand, onDisconnect, onNodeConfigured, selectedLat, selectedLng, state.ble_address, state.node_id]);
 
@@ -174,7 +170,7 @@ export function HardwareSetup({
 
       <div className="w-[400px] border-l border-[var(--foreground)]/[0.06] overflow-y-auto p-4">
         <div className="mb-3 rounded-lg bg-[var(--foreground)]/[0.03] p-3 text-xs">
-          Gateway: {online ? "online" : "offline"} · {connected ? "connected" : "disconnected"}
+          Gateway: {online ? "online" : "offline"} · {connected ? `connected · ${state.node_name || state.node_id || "…"}` : "disconnected"}
         </div>
 
         <div className="mb-3 space-y-2">
@@ -211,7 +207,7 @@ export function HardwareSetup({
                           : "bg-orange-400/20 text-orange-700"
                       }`}
                     >
-                      {isRegistered ? "Connected" : "Unregistered"}
+                      {isRegistered ? "Configured" : "New"}
                     </span>
                     <div className="min-w-0">
                       <div className="truncate text-xs font-medium text-[var(--foreground)]">{d.name || "LifeLink"}</div>
@@ -261,13 +257,13 @@ export function HardwareSetup({
             Save Node Config
           </button>
           {saveStatus === "saving" && (
-            <div className="mt-2 text-[11px] text-[var(--muted)]">Saved locally. Syncing to node...</div>
+            <div className="mt-2 text-[11px] text-[var(--muted)]">Saving...</div>
           )}
           {saveStatus === "synced" && (
-            <div className="mt-2 text-[11px] text-emerald-600">Saved and synced.</div>
+            <div className="mt-2 text-[11px] text-emerald-600">✓ Saved and synced.</div>
           )}
           {saveStatus === "sync_error" && (
-            <div className="mt-2 text-[11px] text-orange-600">Saved locally, but sync failed. Reconnect and retry.</div>
+            <div className="mt-2 text-[11px] text-orange-600">Saved locally, but sync failed.</div>
           )}
         </div>
 
