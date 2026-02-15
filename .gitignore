@@ -1,2 +1,10 @@
 */context.markdown
 esp32/lifelink/.pio/build/
+
+# Python virtual environments
+.venv/
+.venv-*/
+venv/
+**/.venv/
+**/.venv-*/
+**/venv/

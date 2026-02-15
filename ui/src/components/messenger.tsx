@@ -1,767 +1,560 @@
 "use client";
 
 import {
-  useState,
-  useRef,
   useEffect,
   useMemo,
+  useRef,
+  useState,
   type Dispatch,
-  type SetStateAction,
   type MutableRefObject,
+  type SetStateAction,
 } from "react";
 import type { SensorNode } from "@/types/sensor";
-import type { SimState } from "@/simulation/types";
-import { haversine } from "@/simulation/utils";
-
-/* ── Exported types ────────────────────────────────────── */
+import type {
+  GatewayDevice,
+  GatewayMember,
+  GatewayState,
+} from "@/hooks/use-gateway-bridge";
 
 export interface ChatMessage {
   id: string;
-  fromNodeId: number; // gateway node ID (BLE)
-  toNodeId: number; // destination node ID (LoRa)
+  fromNodeId: number;
+  toNodeId: number;
   text: string;
-  timestamp: number; // tick when sent
+  timestamp: number;
   direction: "sent" | "received";
-  status: "sending" | "routing" | "delivered" | "failed";
-  hops?: number;
+  status: "queued" | "sent" | "failed";
+  vital?: boolean;
+  intent?: string;
+  urgency?: number;
 }
-
-/* ── Props ─────────────────────────────────────────────── */
 
 interface MessengerProps {
   nodes: SensorNode[];
-  simState: SimState | null;
   messages: ChatMessage[];
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
-  msgCounter: MutableRefObject<number>;
-  onSendMessage: (from: number, to: number, trackingId?: string) => void;
+  msgCounterRef: MutableRefObject<number>;
+  gatewayOnline: boolean;
+  gatewayState: GatewayState;
+  gatewayDevices: GatewayDevice[];
+  gatewayMembers: GatewayMember[];
+  gatewayLogs: string[];
+  onGatewayScan: () => Promise<GatewayDevice[]>;
+  onGatewayConnect: (address: string) => Promise<void>;
+  onGatewayDisconnect: () => Promise<void>;
+  onGatewayCommand: (command: string) => Promise<void>;
+  onGatewayClearMessages: () => Promise<void>;
 }
 
-/* ── Constants ─────────────────────────────────────────── */
-
-/** Simulated user position (Stanford Main Quad area) */
-const USER_LAT = 37.4275;
-const USER_LNG = -122.1697;
-
-/**
- * BLE range in meters for gateway connection.
- * Real hardware ≈ 30-50m; bumped for simulation demo.
- */
-const BLE_RANGE_M = 250;
-
-/* ── Helpers ────────────────────────────────────────────── */
-
-function getDistance(node: SensorNode): number {
-  return haversine(USER_LAT, USER_LNG, node.lat, node.lng);
+function toHex(nodeIdNum: number): string {
+  return nodeIdNum.toString(16).toUpperCase().padStart(4, "0");
 }
 
-/** BLE signal strength — shorter range thresholds than LoRa */
-function bleSignal(dist: number): { filled: number; label: string } {
-  if (dist < 60) return { filled: 3, label: "Strong" };
-  if (dist < 130) return { filled: 2, label: "Good" };
-  if (dist < BLE_RANGE_M) return { filled: 1, label: "Weak" };
-  return { filled: 0, label: "Out of range" };
+function nodeDisplayName(node: SensorNode): string {
+  return node.label || node.hardwareIdHex || `Node ${node.id}`;
 }
 
-function BleIndicator({ dist }: { dist: number }) {
-  const { filled } = bleSignal(dist);
+/* ── Inline spinner ── */
+function Spinner({ size = 24 }: { size?: number }) {
   return (
-    <span className="inline-flex items-center gap-[2px]">
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className={`inline-block rounded-full transition-colors ${
-            i < filled
-              ? "h-1.5 w-1.5 bg-blue-500"
-              : "h-1.5 w-1.5 bg-[var(--foreground)]/10"
-          }`}
-        />
-      ))}
-    </span>
+    <svg
+      className="animate-spin"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="3"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+      />
+    </svg>
   );
 }
-
-function LoraIndicator({ discovered }: { discovered: boolean }) {
-  // If discovered via gossip, show signal; otherwise show unknown
-  return (
-    <span className="inline-flex items-center gap-[2px]">
-      {discovered ? (
-        [0, 1, 2].map((i) => (
-          <span
-            key={i}
-            className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
-          />
-        ))
-      ) : (
-        <>
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--foreground)]/10" />
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--foreground)]/10" />
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--foreground)]/10" />
-        </>
-      )}
-    </span>
-  );
-}
-
-/** Derive transient display status */
-function displayStatus(
-  msg: ChatMessage,
-  simState: SimState | null,
-): ChatMessage["status"] {
-  if (msg.status === "delivered" || msg.status === "failed") return msg.status;
-  if (!simState) return msg.status;
-  if (simState.tick - msg.timestamp > 2) return "routing";
-  return "sending";
-}
-
-/* ── Selection types ───────────────────────────────────── */
-type DestSelection = number | "all" | null;
-
-/* ── Component ──────────────────────────────────────────── */
 
 export function Messenger({
   nodes,
-  simState,
   messages,
   setMessages,
-  msgCounter,
-  onSendMessage,
+  msgCounterRef,
+  gatewayOnline,
+  gatewayState,
+  gatewayDevices,
+  gatewayMembers,
+  gatewayLogs,
+  onGatewayScan,
+  onGatewayConnect,
+  onGatewayDisconnect,
+  onGatewayCommand,
+  onGatewayClearMessages,
 }: MessengerProps) {
-  const [selectedGateway, setSelectedGateway] = useState<number | null>(null);
-  const [selectedDest, setSelectedDest] = useState<DestSelection>(null);
+  const [selectedAddress, setSelectedAddress] = useState("");
+  const [selectedReceiverHex, setSelectedReceiverHex] = useState("");
   const [draft, setDraft] = useState("");
-  const threadRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Sort nodes by distance from user
-  const sortedNodes = useMemo(
-    () => [...nodes].sort((a, b) => getDistance(a) - getDistance(b)),
+  const connectedSenderHex = gatewayState.node_id?.toUpperCase() || "";
+
+  const hardwareNodes = useMemo(
+    () => nodes.filter((n) => Boolean(n.hardwareIdHex)),
     [nodes],
   );
 
-  // BLE-range gateways
-  const bleGateways = useMemo(
-    () => sortedNodes.filter((n) => getDistance(n) <= BLE_RANGE_M),
-    [sortedNodes],
+  const nodeByAddress = useMemo(
+    () =>
+      new Map(
+        hardwareNodes
+          .filter((n) => n.bleAddress)
+          .map((n) => [(n.bleAddress || "").toUpperCase(), n] as const),
+      ),
+    [hardwareNodes],
   );
 
-  // Auto-select nearest gateway
-  useEffect(() => {
-    if (selectedGateway === null && bleGateways.length > 0) {
-      setSelectedGateway(bleGateways[0].id);
-    }
-  }, [selectedGateway, bleGateways]);
-
-  const gatewayNode = nodes.find((n) => n.id === selectedGateway) ?? null;
-  const gatewayDist = gatewayNode ? Math.round(getDistance(gatewayNode)) : 0;
-
-  /* ── Label resolver ──────────────────────────────────
-   * Labels come from what the GATEWAY has discovered via
-   * gossip heartbeats — not from a hardcoded config.
-   * If the gateway hasn't heard about a node yet, we show
-   * "Node <id>" (undiscovered).
-   * ─────────────────────────────────────────────────── */
-  const gatewayState = simState?.nodeStates.find(
-    (n) => n.id === selectedGateway,
+  /* Receiver list: mesh members excluding the connected node itself. */
+  const receiverMembers = useMemo(
+    () => gatewayMembers.filter((m) => m.node_id.toUpperCase() !== connectedSenderHex),
+    [connectedSenderHex, gatewayMembers],
   );
 
-  const resolveLabel = useMemo(() => {
-    const discovered = gatewayState?.discoveredLabels ?? {};
-    return (nodeId: number): string => {
-      // Gateway's own name
-      if (nodeId === selectedGateway && gatewayNode)
-        return gatewayNode.label ?? `Node ${nodeId}`;
-      // Gossip-discovered label
-      if (discovered[nodeId]) return discovered[nodeId];
-      // Undiscovered — show generic ID
-      return `Node ${nodeId}`;
-    };
-  }, [gatewayState?.discoveredLabels, selectedGateway, gatewayNode]);
+  const resolveNodeLabel = (hex: string): string => {
+    const node = hardwareNodes.find((n) => n.hardwareIdHex?.toUpperCase() === hex);
+    if (node) return nodeDisplayName(node);
+    const member = gatewayMembers.find((m) => m.node_id.toUpperCase() === hex);
+    if (member && member.name) return member.name;
+    return `0x${hex}`;
+  };
 
-  // How many nodes has the gateway discovered?
-  const discoveredCount = Object.keys(
-    gatewayState?.discoveredLabels ?? {},
-  ).length;
-
-  // All nodes except gateway, annotated with discovery status
-  const destinations = useMemo(() => {
-    const discovered = gatewayState?.discoveredLabels ?? {};
-    return sortedNodes
-      .filter((n) => n.id !== selectedGateway)
-      .map((n) => ({
-        ...n,
-        discoveredLabel: discovered[n.id] ?? null,
-        isDiscovered: n.id in discovered,
-      }));
-  }, [sortedNodes, selectedGateway, gatewayState?.discoveredLabels]);
-
-  // Auto-scroll
+  // Reset on EVERY connectedSenderHex change — no guards, no skipping.
   useEffect(() => {
-    if (threadRef.current) {
-      threadRef.current.scrollTop = threadRef.current.scrollHeight;
+    setMessages([]);
+    setSelectedReceiverHex("");
+  }, [connectedSenderHex, setMessages]);
+
+  // Auto-scroll chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [gatewayLogs.length]);
+
+  /* ── Derived ── */
+  const canSend = Boolean(
+    gatewayOnline &&
+      gatewayState.connected &&
+      connectedSenderHex &&
+      selectedReceiverHex &&
+      draft.trim() &&
+      !busyLabel,
+  );
+
+  /* ── Handlers ── */
+  const handleRefreshMessages = async () => {
+    setBusyLabel("Refreshing messages…");
+    setError("");
+    try {
+      const res = await fetch("http://127.0.0.1:8765/messages", {
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      const data: {
+        messages: {
+          idx: number;
+          direction: string;
+          peer: string;
+          msg_id: number;
+          vital: boolean;
+          intent: string;
+          urgency: number;
+          body: string;
+        }[];
+      } = await res.json();
+      console.log("Refresh Messages response:", data);
+
+      if (!connectedSenderHex || !data.messages || data.messages.length === 0) return;
+
+      const now = Date.now();
+
+      const refreshed: ChatMessage[] = data.messages.map((h) => {
+        const peerHex = h.peer.toUpperCase();
+        const isSent = h.direction === "S";
+        const key = `hw-${connectedSenderHex}-${h.direction}-${peerHex}-${h.msg_id}`;
+        const fromNodeId = isSent ? parseInt(connectedSenderHex, 16) : parseInt(peerHex, 16);
+        const toNodeId = isSent ? parseInt(peerHex, 16) : parseInt(connectedSenderHex, 16);
+        return {
+          id: key,
+          fromNodeId,
+          toNodeId,
+          text: h.body,
+          timestamp: now,
+          direction: isSent ? ("sent" as const) : ("received" as const),
+          status: "sent" as const,
+          vital: h.vital,
+          intent: h.intent,
+          urgency: h.urgency,
+        };
+      });
+
+      setMessages(refreshed);
+    } catch (err) {
+      setError(String(err));
+      console.error("Failed to refresh messages:", err);
+    } finally {
+      setBusyLabel(null);
     }
-  }, [messages, selectedDest]);
+  };
 
-  // Enrich with transient statuses
-  const enrichedMessages = messages.map((msg) => ({
-    ...msg,
-    status: displayStatus(msg, simState),
-  }));
+  const handleClearMessages = async () => {
+    setBusyLabel("Clearing message cache…");
+    setError("");
+    try {
+      await onGatewayClearMessages();
+      setMessages([]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusyLabel(null);
+    }
+  };
 
-  // Filter for current thread
-  const threadMessages =
-    selectedDest === "all"
-      ? enrichedMessages
-      : selectedDest !== null
-        ? enrichedMessages.filter(
-            (m) =>
-              (m.toNodeId === selectedDest &&
-                m.fromNodeId === selectedGateway) ||
-              (m.fromNodeId === selectedDest &&
-                m.toNodeId === selectedGateway),
-          )
-        : [];
+  const handleScan = async () => {
+    setBusyLabel("Scanning for devices…");
+    setError("");
+    try {
+      const found = await onGatewayScan();
+      if (!selectedAddress && found.length > 0) {
+        setSelectedAddress(found[0].address);
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusyLabel(null);
+    }
+  };
 
-  const handleSend = () => {
-    if (
-      !draft.trim() ||
-      selectedDest === null ||
-      selectedDest === "all" ||
-      !gatewayNode
-    )
-      return;
+  const handleConnect = async (address?: string) => {
+    const target = address || selectedAddress;
+    if (!target) return;
+    setBusyLabel("Connecting…");
+    setError("");
+    try {
+      await onGatewayConnect(target);
+      setSelectedAddress(target);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusyLabel(null);
+    }
+  };
 
-    const id = `msg-${++msgCounter.current}`;
-    const msg: ChatMessage = {
-      id,
-      fromNodeId: gatewayNode.id,
-      toNodeId: selectedDest,
-      text: draft.trim(),
-      timestamp: simState?.tick ?? 0,
-      direction: "sent",
-      status: "sending",
-    };
+  const handleDisconnect = async () => {
+    setBusyLabel("Disconnecting…");
+    setError("");
+    try {
+      await onGatewayDisconnect();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusyLabel(null);
+    }
+  };
 
-    setMessages((prev) => [...prev, msg]);
-    onSendMessage(gatewayNode.id, selectedDest, id);
+  const handleSend = async () => {
+    if (!canSend) return;
+    const text = draft.trim();
+    const messageId = `msg-${++msgCounterRef.current}`;
+    const fromNum = parseInt(connectedSenderHex, 16) || 0;
+    const toNum = parseInt(selectedReceiverHex, 16) || 0;
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: messageId,
+        fromNodeId: fromNum,
+        toNodeId: toNum,
+        text,
+        timestamp: Date.now(),
+        direction: "sent",
+        status: "queued",
+      },
+    ]);
     setDraft("");
-    inputRef.current?.focus();
-  };
+    setBusyLabel("Sending…");
+    setError("");
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    try {
+      await onGatewayCommand(`SEND|${selectedReceiverHex}|${text}`);
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, status: "sent" } : m)),
+      );
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, status: "failed" } : m)),
+      );
+      setError(String(err));
+    } finally {
+      setBusyLabel(null);
     }
   };
 
-  const selectedNodeLabel =
-    selectedDest === "all"
-      ? "All Messages"
-      : selectedDest !== null
-        ? resolveLabel(selectedDest)
-        : "Unknown";
-
-  const pendingCount = messages.filter(
-    (m) => m.status === "sending" || m.status === "routing",
-  ).length;
-  const deliveredCount = messages.filter(
-    (m) => m.status === "delivered",
-  ).length;
-
-  const canSend =
-    draft.trim() &&
-    selectedDest !== null &&
-    selectedDest !== "all" &&
-    gatewayNode !== null;
-
+  /* ── Render ── */
   return (
-    <div className="absolute inset-0 top-16 bottom-10 z-[500] flex flex-col">
-      {/* ── Gateway selector (BLE) ──────────────────────── */}
-      <div className="mx-auto w-full max-w-lg px-4 pt-2">
-        <div className="flex items-center gap-2 pb-1.5">
-          <span className="text-[10px] font-semibold tracking-wide text-blue-500/80 uppercase">
-            📱 Your gateway
-          </span>
-          <span className="text-[10px] text-[var(--muted)]/50">BLE</span>
-        </div>
+    <div className="absolute inset-0 top-16 bottom-10 z-[500] flex">
 
-        <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
-          {bleGateways.length === 0 ? (
-            <span className="text-[11px] text-[var(--muted)]">
-              No nodes in BLE range ({BLE_RANGE_M}m)
+      {/* ══════════ Left pane — Chat ══════════ */}
+      <div className="relative flex flex-1 flex-col overflow-hidden">
+        {/* ── Loading overlay (left pane only) ── */}
+        {busyLabel && (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-xl bg-white/70 backdrop-blur-sm">
+            <Spinner size={32} />
+            <span className="text-sm font-medium text-[var(--foreground)]">
+              {busyLabel}
             </span>
-          ) : (
-            bleGateways.map((node) => {
-              const dist = Math.round(getDistance(node));
-              const isSelected = selectedGateway === node.id;
-              return (
+          </div>
+        )}
+        {/* ── Connection / Receiver bar ── */}
+        <div className="w-full px-4 py-3">
+          <div className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-[11px] font-semibold text-[var(--foreground)]">
+                {gatewayState.connected
+                  ? `Connected · ${gatewayState.node_name || `0x${connectedSenderHex}`}`
+                  : "Not connected"}
+              </div>
+              <div className="flex items-center gap-2">
                 <button
-                  key={node.id}
-                  onClick={() => setSelectedGateway(node.id)}
-                  className={`flex shrink-0 flex-col items-start gap-1 rounded-xl px-4 py-2.5 transition-all duration-150 ${
-                    isSelected
-                      ? "bg-blue-500/10 ring-1.5 ring-blue-500/40"
-                      : "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
-                  }`}
+                  onClick={() => void handleRefreshMessages()}
+                  disabled={!!busyLabel}
+                  className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
                 >
-                  <span
-                    className={`text-[11px] font-medium leading-tight ${
-                      isSelected
-                        ? "text-blue-600"
-                        : "text-[var(--foreground)]"
-                    }`}
-                  >
-                    {node.label}
-                  </span>
-                  <span className="flex items-center gap-2">
-                    <span className="text-[10px] tabular-nums text-[var(--muted)]">
-                      {dist}m
-                    </span>
-                    <BleIndicator dist={dist} />
-                  </span>
+                  Refresh Messages
                 </button>
-              );
-            })
-          )}
-        </div>
-      </div>
+                <button
+                  onClick={() => void handleClearMessages()}
+                  disabled={!!busyLabel}
+                  className="rounded-lg bg-red-500/10 px-2.5 py-1 text-[11px] font-medium text-red-600 hover:bg-red-500/20 active:scale-95 transition disabled:pointer-events-none"
+                >
+                  Clear Cache
+                </button>
+                <button
+                  onClick={() => void handleScan()}
+                  disabled={!!busyLabel}
+                  className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
+                >
+                  Scan
+                </button>
+              </div>
+            </div>
 
-      {/* ── Destination selector (LoRa mesh) ───────────── */}
-      <div className="mx-auto w-full max-w-lg px-4">
-        <div className="flex items-center gap-2 pb-1.5">
-          <span className="text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase">
-            📡 Send to
-          </span>
-          <span className="text-[10px] text-[var(--muted)]/50">LoRa mesh</span>
-          <span className="text-[10px] text-[var(--muted)]/40">
-            · {discoveredCount} discovered
-          </span>
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
-          {/* Log chip */}
-          <button
-            onClick={() => setSelectedDest("all")}
-            className={`flex shrink-0 items-center gap-2 rounded-xl px-4 py-2.5 transition-all duration-150 ${
-              selectedDest === "all"
-                ? "bg-[var(--foreground)]/[0.08] ring-1.5 ring-[var(--foreground)]/20"
-                : "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
-            }`}
-          >
-            <span
-              className={`text-[11px] font-medium leading-tight ${
-                selectedDest === "all"
-                  ? "text-[var(--foreground)]"
-                  : "text-[var(--muted)]"
-              }`}
-            >
-              Log
-            </span>
-            {messages.length > 0 && (
-              <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--foreground)]/10 px-1 text-[9px] font-semibold tabular-nums text-[var(--muted)]">
-                {messages.length}
-              </span>
-            )}
-          </button>
-
-          {/* Destination chips — labels come from gossip discovery */}
-          {destinations.map((node) => {
-            const isSelected = selectedDest === node.id;
-            const displayLabel = node.discoveredLabel ?? `Node ${node.id}`;
-            const threadCount = messages.filter(
-              (m) =>
-                (m.toNodeId === node.id &&
-                  m.fromNodeId === selectedGateway) ||
-                (m.fromNodeId === node.id &&
-                  m.toNodeId === selectedGateway),
-            ).length;
-            return (
-              <button
-                key={node.id}
-                onClick={() => setSelectedDest(node.id)}
-                className={`flex shrink-0 flex-col items-start gap-1 rounded-xl px-4 py-2.5 transition-all duration-150 ${
-                  isSelected
-                    ? "bg-[var(--accent)]/10 ring-1.5 ring-[var(--accent)]"
-                    : node.isDiscovered
-                      ? "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
-                      : "bg-[var(--foreground)]/[0.02] opacity-50 hover:opacity-70"
-                }`}
-              >
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`text-[11px] font-medium leading-tight ${
-                      isSelected
-                        ? "text-[var(--accent)]"
-                        : node.isDiscovered
-                          ? "text-[var(--foreground)]"
-                          : "text-[var(--muted)]"
+            <div className="text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
+              From
+            </div>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {gatewayDevices.map((d) => {
+                const upperAddr = d.address.toUpperCase();
+                const node = nodeByAddress.get(upperAddr);
+                const isActive =
+                  gatewayState.connected && gatewayState.ble_address.toUpperCase() === upperAddr;
+                return (
+                  <button
+                    key={`from-${d.address}`}
+                    disabled={!!busyLabel}
+                    onClick={() => {
+                      if (isActive) {
+                        void handleDisconnect();
+                        return;
+                      }
+                      void handleConnect(d.address);
+                    }}
+                    className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
+                      isActive
+                        ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30"
+                        : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
                     }`}
                   >
-                    {displayLabel}
-                  </span>
-                  {!node.isDiscovered && (
-                    <span className="text-[9px] text-[var(--muted)]/40">?</span>
-                  )}
-                  {threadCount > 0 && (
-                    <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--accent)]/20 px-0.5 text-[8px] font-bold tabular-nums text-[var(--accent)]">
-                      {threadCount}
-                    </span>
-                  )}
-                </span>
-                <span className="flex items-center gap-2">
-                  {node.isDiscovered ? (
-                    <span className="text-[10px] text-[var(--muted)]/60">
-                      via gossip
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-[var(--muted)]/40">
-                      undiscovered
-                    </span>
-                  )}
-                  <LoraIndicator discovered={node.isDiscovered} />
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── Divider ────────────────────────────────────── */}
-      <div className="mx-auto w-full max-w-lg px-6">
-        <div className="h-px bg-[var(--foreground)]/[0.06]" />
-      </div>
-
-      {/* ── Thread / log area ──────────────────────────── */}
-      <div
-        ref={threadRef}
-        className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-2 overflow-y-auto px-6 py-4 scrollbar-none"
-      >
-        {selectedDest === null ? (
-          <EmptyState
-            icon="📡"
-            title="Select a destination"
-            description="Pick a gateway above (BLE), then choose where to send via the LoRa mesh. Node names appear as gossip heartbeats propagate."
-          />
-        ) : selectedDest === "all" && threadMessages.length === 0 ? (
-          <EmptyState
-            icon="📋"
-            title="No messages yet"
-            description="Send a message to any node and it will appear in the log."
-          />
-        ) : selectedDest !== "all" && threadMessages.length === 0 ? (
-          <EmptyState
-            icon="💬"
-            title="No messages yet"
-            description={`Send your first message to ${selectedNodeLabel}`}
-          />
-        ) : selectedDest === "all" ? (
-          threadMessages.map((msg) => (
-            <LogEntry
-              key={msg.id}
-              message={msg}
-              resolveLabel={resolveLabel}
-            />
-          ))
-        ) : (
-          threadMessages.map((msg) => (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              resolveLabel={resolveLabel}
-              gatewayLabel={gatewayNode?.label}
-            />
-          ))
-        )}
-      </div>
-
-      {/* ── Summary bar ────────────────────────────────── */}
-      {messages.length > 0 && (
-        <div className="mx-auto flex w-full max-w-lg items-center justify-center gap-4 px-6 py-1.5">
-          <span className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
-            {deliveredCount} delivered
-          </span>
-          {pendingCount > 0 && (
-            <span className="flex items-center gap-1.5 text-[10px] text-[var(--suggest)]">
-              <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--suggest)]" />
-              {pendingCount} in transit
-            </span>
-          )}
-          <span className="text-[10px] text-[var(--muted)]/50">
-            tick {simState?.tick ?? 0}
-          </span>
-        </div>
-      )}
-
-      {/* ── Route path + Composer ───────────────────────── */}
-      <div className="mx-auto w-full max-w-lg px-4 pb-2">
-        {/* Route visualization */}
-        {gatewayNode &&
-          selectedDest !== null &&
-          selectedDest !== "all" && (
-            <div className="mb-2 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted)]">
-              <span className="text-blue-500">📱 You</span>
-              <span className="text-[var(--muted)]/30">—</span>
-              <span className="rounded-md bg-blue-500/10 px-1.5 py-0.5 text-blue-600">
-                BLE
-              </span>
-              <span className="text-[var(--muted)]/30">→</span>
-              <span className="font-medium text-[var(--foreground)]/70">
-                {gatewayNode.label}
-              </span>
-              <span className="text-[var(--muted)]/30">—</span>
-              <span className="rounded-md bg-[var(--accent)]/10 px-1.5 py-0.5 text-[var(--accent)]">
-                LoRa
-              </span>
-              <span className="text-[var(--muted)]/30">→</span>
-              <span className="font-medium text-[var(--foreground)]/70">
-                {selectedNodeLabel}
-              </span>
+                    {node ? nodeDisplayName(node) : d.name || "LifeLink"}
+                  </button>
+                );
+              })}
+              {gatewayDevices.length === 0 && (
+                <div className="text-[11px] text-[var(--muted)]">No senders — hit Scan</div>
+              )}
             </div>
-          )}
 
-        {/* Input bar */}
-        <div
-          className={`flex items-center gap-2 rounded-2xl px-4 py-2 transition-colors ${
-            canSend || (selectedDest !== null && selectedDest !== "all")
-              ? "bg-white shadow-sm ring-1 ring-[var(--foreground)]/[0.06]"
-              : "bg-[var(--foreground)]/[0.03]"
-          }`}
-        >
-          <input
-            ref={inputRef}
-            type="text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={
-              selectedDest === null ||
-              selectedDest === "all" ||
-              !gatewayNode
-            }
-            placeholder={
-              !gatewayNode
-                ? "No gateway in BLE range"
-                : selectedDest !== null && selectedDest !== "all"
-                  ? `Message ${selectedNodeLabel} via ${gatewayNode.label}…`
-                  : selectedDest === "all"
-                    ? "Viewing message log"
-                    : "Select a destination above"
-            }
-            className="flex-1 bg-transparent text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/60 outline-none disabled:cursor-not-allowed"
-          />
-          <button
-            onClick={handleSend}
-            disabled={!canSend}
-            className={`flex h-7 w-7 items-center justify-center rounded-full transition-all duration-150 ${
-              canSend
-                ? "bg-[var(--accent)] text-white shadow-sm hover:opacity-90"
-                : "bg-[var(--foreground)]/[0.06] text-[var(--muted)]/40"
-            }`}
-            aria-label="Send message"
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
-          </button>
+            <div className="mt-3 text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
+              To
+            </div>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {receiverMembers.map((m) => {
+                const hex = m.node_id.toUpperCase();
+                const active = selectedReceiverHex === hex;
+                const label = m.name || `0x${hex}`;
+                return (
+                  <button
+                    key={`to-${hex}`}
+                    disabled={!!busyLabel}
+                    onClick={() => setSelectedReceiverHex(hex)}
+                    className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
+                      active
+                        ? "bg-[var(--accent)] text-white ring-[var(--accent)]"
+                        : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
+                    }`}
+                  >
+                    {label}
+                    {m.hops_away > 0 && (
+                      <span className="ml-1 text-[9px] opacity-60">{m.hops_away}h</span>
+                    )}
+                  </button>
+                );
+              })}
+              {receiverMembers.length === 0 && (
+                <div className="text-[11px] text-[var(--muted)]">
+                  {gatewayState.connected ? "No mesh peers yet" : "Connect a sender to see mesh peers"}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
-        {/* BLE connection hint */}
-        {gatewayNode && (
-          <p className="mt-1 text-center text-[10px] text-[var(--muted)]/40">
-            {gatewayDist}m to {gatewayNode.label} via Bluetooth ·{" "}
-            {bleSignal(gatewayDist).label}
-          </p>
-        )}
+        {/* ── Messages ── */}
+        <div className="flex flex-1 flex-col overflow-hidden px-4 pb-3">
+          <div className="flex-1 overflow-y-auto rounded-xl bg-[var(--foreground)]/[0.02] p-3">
+            {messages.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-[var(--muted)]">
+                No messages yet. Connect a sender, pick a receiver, and send.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {messages.map((msg) => {
+                  const isSent = msg.direction === "sent";
+                  const isAck = msg.text.startsWith("<ACK>");
+                  const fromHex = toHex(msg.fromNodeId);
+                  const toHex_ = toHex(msg.toNodeId);
+                  return (
+                    <div
+                      key={msg.id}
+                      className={`rounded-lg px-3 py-2 text-xs shadow-sm ring-1 ${
+                        isAck
+                          ? "bg-amber-50 ring-amber-300/40 mx-12"
+                          : isSent
+                            ? "bg-blue-50 ml-8 ring-[var(--foreground)]/[0.06]"
+                            : "bg-white mr-8 ring-[var(--foreground)]/[0.06]"
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-medium ${
+                            isAck
+                              ? "bg-amber-500/10 text-amber-700"
+                              : isSent
+                                ? "bg-blue-500/10 text-blue-700"
+                                : "bg-emerald-500/10 text-emerald-700"
+                          }`}
+                        >
+                          {isAck ? "ACK" : isSent ? "Sent" : "Recv"}
+                        </span>
+                        <span>
+                          {resolveNodeLabel(fromHex)} → {resolveNodeLabel(toHex_)}
+                        </span>
+                        {msg.vital && (
+                          <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-semibold text-red-600">
+                            VITAL {msg.intent} U{msg.urgency}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 text-[13px] text-[var(--foreground)]">{msg.text}</div>
+                    </div>
+                  );
+                })}
+                <div ref={chatEndRef} />
+              </div>
+            )}
+          </div>
+
+          {/* ── Compose bar ── */}
+          <div className="mt-3 rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
+            <div className="flex items-center gap-2">
+              <input
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleSend();
+                  }
+                }}
+                placeholder={
+                  gatewayState.connected
+                    ? selectedReceiverHex
+                      ? `Message to ${receiverMembers.find((m) => m.node_id.toUpperCase() === selectedReceiverHex)?.name || `0x${selectedReceiverHex}`}`
+                      : "Select a receiver above"
+                    : "Connect a sender first"
+                }
+                disabled={!!busyLabel}
+                className="h-10 flex-1 rounded-lg border border-[var(--foreground)]/[0.12] px-3 text-sm disabled:pointer-events-none"
+              />
+              <button
+                onClick={() => void handleSend()}
+                disabled={!canSend}
+                className="h-10 rounded-lg bg-[var(--accent)] px-4 text-sm font-semibold text-white transition active:scale-95 disabled:opacity-40"
+              >
+                Send
+              </button>
+            </div>
+            {error && <div className="mt-2 text-[11px] text-red-600">{error}</div>}
+          </div>
+        </div>
       </div>
-    </div>
-  );
-}
 
-/* ── Empty State ───────────────────────────────────────── */
-
-function EmptyState({
-  icon,
-  title,
-  description,
-}: {
-  icon: string;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-      <span className="text-3xl">{icon}</span>
-      <span className="text-sm font-medium text-[var(--foreground)]/60">
-        {title}
-      </span>
-      <span className="max-w-64 text-xs leading-relaxed text-[var(--muted)]">
-        {description}
-      </span>
-    </div>
-  );
-}
-
-/* ── Message Bubble (chat view) ────────────────────────── */
-
-function MessageBubble({
-  message,
-  resolveLabel,
-  gatewayLabel,
-}: {
-  message: ChatMessage;
-  resolveLabel: (id: number) => string;
-  gatewayLabel?: string;
-}) {
-  const isSent = message.direction === "sent";
-  const destLabel = resolveLabel(message.toNodeId);
-
-  const {
-    text: statusText,
-    color: statusColor,
-    icon: statusIcon,
-  } = getStatusDisplay(message.status);
-
-  return (
-    <div
-      className={`flex flex-col gap-0.5 ${isSent ? "items-end" : "items-start"}`}
-    >
-      {!isSent && (
-        <span className="px-3 text-[10px] font-medium text-[var(--muted)]">
-          {resolveLabel(message.fromNodeId)}
-        </span>
-      )}
-
-      <div
-        className={`max-w-[75%] rounded-2xl px-4 py-2.5 ${
-          isSent
-            ? "rounded-br-md bg-[var(--accent)] text-white"
-            : "rounded-bl-md bg-[var(--foreground)]/[0.06] text-[var(--foreground)]"
-        }`}
-      >
-        <p className="text-sm leading-relaxed">{message.text}</p>
-      </div>
-
-      {isSent && (
-        <span
-          className={`flex items-center gap-1 px-1 text-[10px] ${statusColor}`}
-        >
-          <span>{statusIcon}</span>
-          {statusText}
-          {message.status === "delivered" && (
-            <span className="text-[var(--muted)]">
-              · via {gatewayLabel ?? "gateway"} → {destLabel}
-            </span>
-          )}
-          {message.status === "routing" && gatewayLabel && (
-            <span className="text-[var(--muted)]/60">
-              · from {gatewayLabel}
-            </span>
-          )}
-        </span>
-      )}
-    </div>
-  );
-}
-
-/* ── Log Entry (all-messages view) ─────────────────────── */
-
-function LogEntry({
-  message,
-  resolveLabel,
-}: {
-  message: ChatMessage;
-  resolveLabel: (id: number) => string;
-}) {
-  const fromLabel = resolveLabel(message.fromNodeId);
-  const toLabel = resolveLabel(message.toNodeId);
-
-  const {
-    text: statusText,
-    color: statusColor,
-    bg: statusBg,
-    icon: statusIcon,
-  } = getStatusDisplay(message.status);
-
-  return (
-    <div className="flex items-start gap-3 rounded-xl bg-[var(--foreground)]/[0.02] px-4 py-3 transition-colors hover:bg-[var(--foreground)]/[0.04]">
-      <span
-        className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] ${statusBg}`}
-      >
-        {statusIcon}
-      </span>
-
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div className="flex items-center gap-1 text-[10px]">
-          <span className="rounded bg-blue-500/10 px-1 text-blue-600">
-            BLE
+      {/* ══════════ Right pane — Gateway Log ══════════ */}
+      <div className="flex w-80 flex-col border-l border-[var(--foreground)]/[0.08] bg-slate-950">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
+          <span className="text-[11px] font-semibold tracking-wide text-slate-400 uppercase">
+            Gateway Log
           </span>
-          <span className="font-medium text-[var(--foreground)]">
-            {fromLabel}
-          </span>
-          <span className="text-[var(--muted)]/40">→</span>
-          <span className="rounded bg-[var(--accent)]/10 px-1 text-[var(--accent)]">
-            LoRa
-          </span>
-          <span className="font-medium text-[var(--foreground)]">
-            {toLabel}
+          <span className="text-[10px] tabular-nums text-slate-500">
+            {gatewayLogs.length} entries
           </span>
         </div>
-
-        <p className="truncate text-[11px] text-[var(--foreground)]/70">
-          {message.text}
-        </p>
-
-        <div className="flex items-center gap-2">
-          <span className={`text-[10px] ${statusColor}`}>{statusText}</span>
-          <span className="text-[10px] text-[var(--muted)]/40">
-            tick {message.timestamp}
-          </span>
+        <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed text-green-400">
+          {gatewayLogs.length === 0 ? (
+            <div className="text-slate-600">No log entries yet.</div>
+          ) : (
+            <>
+              {[...gatewayLogs].reverse().map((line, idx) => (
+                <div
+                  key={`${idx}-${line}`}
+                  className={
+                    line.includes("TX:") ? "text-cyan-400" :
+                    line.includes("RX ") ? "text-green-400" :
+                    line.includes("Error") || line.includes("ERR") ? "text-red-400" :
+                    line.includes("---") ? "text-yellow-300/70" :
+                    "text-slate-400"
+                  }
+                >
+                  {line}
+                </div>
+              ))}
+              <div ref={logsEndRef} />
+            </>
+          )}
         </div>
       </div>
     </div>
   );
-}
-
-/* ── Status display helpers ────────────────────────────── */
-
-function getStatusDisplay(status: ChatMessage["status"]) {
-  const map = {
-    sending: {
-      text: "Sending…",
-      color: "text-[var(--muted)]",
-      icon: "↑",
-      bg: "bg-[var(--foreground)]/[0.06] text-[var(--muted)]",
-    },
-    routing: {
-      text: "Routing across mesh…",
-      color: "text-[var(--suggest)]",
-      icon: "↗",
-      bg: "bg-[var(--suggest)]/10 text-[var(--suggest)]",
-    },
-    delivered: {
-      text: "Delivered ✓",
-      color: "text-[var(--accent)]",
-      icon: "✓",
-      bg: "bg-[var(--accent)]/10 text-[var(--accent)]",
-    },
-    failed: {
-      text: "Failed to deliver",
-      color: "text-red-500",
-      icon: "✗",
-      bg: "bg-red-500/10 text-red-500",
-    },
-  } as const;
-  return map[status];
 }

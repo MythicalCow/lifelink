@@ -1,36 +1,105 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# LifeLink UI + BLE Gateway
 
-## Getting Started
+This is the operator UI for LifeLink. It includes:
 
-First, run the development server:
+- `Setup` tab: connect BLE nodes, set name/location, save config
+- `Map` tab: display configured nodes
+- `Messages` tab: send via BLE -> LoRa and view node-stored message history + triage metadata
+
+## Prerequisites
+
+- Node.js 20+
+- Python 3.10+
+- Bluetooth adapter enabled on host machine
+
+## 1) Install UI dependencies
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd ui
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 2) Create BLE gateway venv and install Python deps (includes bleak)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cd ui
+python3 -m venv .venv-ble-gateway
+. .venv-ble-gateway/bin/activate
+pip install -U pip
+pip install -r tools/requirements-ble-gateway.txt
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+`tools/requirements-ble-gateway.txt` installs:
 
-## Learn More
+- `bleak` (BLE client)
+- `fastapi`
+- `uvicorn`
 
-To learn more about Next.js, take a look at the following resources:
+## 3) Start BLE gateway
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+cd ui
+npm run gateway
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Gateway endpoint: `http://127.0.0.1:8765`
 
-## Deploy on Vercel
+Useful checks:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+curl -s http://127.0.0.1:8765/state
+curl -s 'http://127.0.0.1:8765/devices?timeout=3'
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 4) Start UI app
+
+In a second terminal:
+
+```bash
+cd ui
+npm run dev
+```
+
+Open: `http://localhost:3000`
+
+---
+
+## Clean test sequence
+
+1. In `Setup`:
+   - Scan BLE devices
+   - Connect node
+   - Set node name + location (+ anchor if needed)
+   - Save
+   - Repeat for all nodes
+2. In `Messages`:
+   - Select receiver (`To`)
+   - Select sender device (`From`)
+   - Send message
+   - Verify node message history panel updates with triage metadata (`VITAL`, `intent`, `urgency`)
+
+---
+
+## Troubleshooting
+
+### Gateway not reachable
+
+```bash
+cd ui
+pkill -9 -f 'tools/ble_gateway.py|npm run gateway|uvicorn.*8765' || true
+npm run gateway
+```
+
+### Only 1-2 devices found
+
+- Re-scan with longer timeout
+- Ensure all boards are powered and advertising
+- Keep only one gateway instance running
+
+```bash
+curl -s 'http://127.0.0.1:8765/devices?timeout=6'
+```
+
+### BLE permission issues on Linux
+
+Run with proper permissions / user in Bluetooth-related groups as needed by your distro.

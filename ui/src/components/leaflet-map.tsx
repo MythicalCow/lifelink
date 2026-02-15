@@ -9,12 +9,13 @@ import {
   Polyline,
   Tooltip,
 } from "react-leaflet";
-import type { SuggestedNode } from "@/types/sensor";
+import type { SensorNode, SuggestedNode } from "@/types/sensor";
 import type { SimState, Transmission, NodeVisualState } from "@/simulation/types";
 import { PacketType } from "@/simulation/types";
 import "leaflet/dist/leaflet.css";
 
 interface LeafletMapProps {
+  nodes: SensorNode[];
   center: [number, number];
   zoom: number;
   suggestions: SuggestedNode[];
@@ -87,30 +88,34 @@ function positionError(ns: NodeVisualState): number {
 }
 
 export function LeafletMap({
+  nodes,
   center,
   zoom,
   suggestions,
   simState,
 }: LeafletMapProps) {
   const [showGodMode, setShowGodMode] = useState(false);
+  const hasSimulation = Boolean(simState);
   const transmissions = simState?.transmissions ?? [];
   const nodeStates = simState?.nodeStates ?? [];
 
   return (
     <>
       {/* God mode toggle */}
-      <div className="absolute top-20 right-4 z-[1000]">
-        <button
-          onClick={() => setShowGodMode(!showGodMode)}
-          className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
-            showGodMode
-              ? "bg-amber-500/90 text-white"
-              : "bg-white/80 text-[var(--muted)] hover:bg-white"
-          }`}
-        >
-          {showGodMode ? "👁 True Positions" : "📡 Estimated"}
-        </button>
-      </div>
+      {hasSimulation && (
+        <div className="absolute top-20 right-4 z-[1000]">
+          <button
+            onClick={() => setShowGodMode(!showGodMode)}
+            className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
+              showGodMode
+                ? "bg-amber-500/90 text-white"
+                : "bg-white/80 text-[var(--muted)] hover:bg-white"
+            }`}
+          >
+            {showGodMode ? "👁 True Positions" : "📡 Estimated"}
+          </button>
+        </div>
+      )}
 
       <MapContainer
         center={center}
@@ -128,7 +133,7 @@ export function LeafletMap({
         />
 
         {/* Transmission lines (always use true positions for physics) */}
-        {transmissions.map((tx, i) => (
+        {hasSimulation && transmissions.map((tx, i) => (
           <Polyline
             key={`tx-${tx.createdTick}-${i}`}
             positions={[
@@ -145,7 +150,8 @@ export function LeafletMap({
         ))}
 
         {/* Error lines: connect true → estimated position (god mode only) */}
-        {showGodMode &&
+        {hasSimulation &&
+          showGodMode &&
           nodeStates
             .filter((ns) => ns.posConfidence > 0 && ns.posConfidence < 1)
             .map((ns) => (
@@ -165,7 +171,8 @@ export function LeafletMap({
             ))}
 
         {/* True position markers (god mode only — faded) */}
-        {showGodMode &&
+        {hasSimulation &&
+          showGodMode &&
           nodeStates.map((ns) => (
             <CircleMarker
               key={`true-${ns.id}`}
@@ -190,7 +197,7 @@ export function LeafletMap({
           ))}
 
         {/* Main node markers — show at ESTIMATED position (or true for anchors/unknown) */}
-        {nodeStates.map((ns) => {
+        {hasSimulation && nodeStates.map((ns) => {
           const color = nodeColor(ns);
           const weight = nodeWeight(ns);
           const isAnchor = ns.posConfidence === 1;
@@ -242,8 +249,52 @@ export function LeafletMap({
           );
         })}
 
+        {!hasSimulation &&
+          nodes.map((node) => {
+            const isAnchor = node.isAnchor ?? false;
+            const hasLocation = node.locationKnown !== false;
+            const color = hasLocation ? (isAnchor ? "#d97706" : "#6b9e8a") : "#9ca3af";
+            return (
+              <CircleMarker
+                key={`node-static-${node.id}`}
+                center={[node.lat, node.lng]}
+                radius={7}
+                pathOptions={{
+                  color,
+                  weight: 2,
+                  opacity: hasLocation ? 0.9 : 0.5,
+                  fillColor: hasLocation && isAnchor ? color : "transparent",
+                  fillOpacity: hasLocation && isAnchor ? 0.3 : 0,
+                  dashArray: hasLocation ? undefined : "3 3",
+                }}
+              >
+                <Tooltip
+                  direction="top"
+                  offset={[0, -10]}
+                  className="lifelink-tooltip"
+                >
+                  <span className="font-semibold">
+                    {node.label || `Node ${node.id}`}
+                    {hasLocation && isAnchor && " 📍"}
+                  </span>
+                  {node.hardwareIdHex && (
+                    <span className="block opacity-50 text-[10px]">
+                      0x{node.hardwareIdHex}
+                    </span>
+                  )}
+                  {!hasLocation && (
+                    <span className="block opacity-60 text-[10px]">
+                      Mesh discovered (location unknown)
+                    </span>
+                  )}
+                </Tooltip>
+              </CircleMarker>
+            );
+          })}
+
         {/* Coverage perimeters (centered on estimated positions) */}
-        {nodeStates
+        {hasSimulation &&
+          nodeStates
           .filter((ns) => ns.posConfidence > 0)
           .map((ns) => {
             const isAnchor = ns.posConfidence === 1;
@@ -265,6 +316,24 @@ export function LeafletMap({
               />
             );
           })}
+
+        {!hasSimulation &&
+          nodes
+            .filter((node) => node.locationKnown !== false)
+            .map((node) => (
+              <Circle
+                key={`perimeter-static-${node.id}`}
+                center={[node.lat, node.lng]}
+                radius={node.radius ?? 170}
+                pathOptions={{
+                  color: node.isAnchor ? "#d97706" : "#6b9e8a",
+                  weight: 1,
+                  opacity: 0.15,
+                  fillColor: node.isAnchor ? "#d97706" : "#6b9e8a",
+                  fillOpacity: 0.03,
+                }}
+              />
+            ))}
 
         {/* Suggested nodes */}
         {suggestions.map((node) => (
