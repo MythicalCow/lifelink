@@ -62,6 +62,7 @@ void LifeLinkLoRaNode::begin() {
   const uint32_t now = millis();
   next_heartbeat_at_ms_ = now + 1000 + (node_id_ % 700);
   next_hop_at_ms_ = now + kHopIntervalMs;
+  next_discovery_sweep_at_ms_ = now + kDiscoverySweepIntervalMs + (node_id_ % 2000);
   next_test_data_at_ms_ = now + 4000 + (node_id_ % 3000);
   next_membership_print_at_ms_ = now + 6000;
 
@@ -120,7 +121,7 @@ void LifeLinkLoRaNode::printBanner() const {
  * ═══════════════════════════════════════════════════════ */
 
 void LifeLinkLoRaNode::runStateIdle() {
-  delay(100);
+  delay(50 + random(0, 100));  // randomized idle to break sync
   runSchedulers();
   state_ = (tx_q_size_ > 0) ? NodeState::kTx : NodeState::kRx;
 }
@@ -195,6 +196,8 @@ void LifeLinkLoRaNode::runStateTxTimeout() {
 
 void LifeLinkLoRaNode::runStateRxTimeout() {
   radio_.standby();
+  // Random back-off to break TX/RX synchronization between nodes
+  delay(random(50, 400));
   runSchedulers();
   state_ = (tx_q_size_ > 0) ? NodeState::kTx : NodeState::kRx;
 }
@@ -220,10 +223,11 @@ void LifeLinkLoRaNode::runSchedulers() {
     next_heartbeat_at_ms_ = now + kHeartbeatIntervalMs
         + static_cast<uint32_t>(random(0, static_cast<long>(kHeartbeatJitterMs)));
   }
-  if (now >= next_test_data_at_ms_) {
-    sendTestDataIfPossible();
-    next_test_data_at_ms_ = now + kTestDataIntervalMs + static_cast<uint32_t>(random(0, 2500));
-  }
+  // Auto-test data disabled — only send when user explicitly sends via BLE
+  // if (now >= next_test_data_at_ms_) {
+  //   sendTestDataIfPossible();
+  //   next_test_data_at_ms_ = now + kTestDataIntervalMs + static_cast<uint32_t>(random(0, 2500));
+  // }
   if (now >= next_membership_print_at_ms_) {
     printMembership();
     next_membership_print_at_ms_ = now + 10000;
@@ -403,34 +407,15 @@ uint8_t LifeLinkLoRaNode::computeHopChannelIndex(uint32_t seed, uint32_t seq) co
   return static_cast<uint8_t>(mixed % kHopChannelCount);
 }
 
-void LifeLinkLoRaNode::maybeApplyFrequencyHop(uint32_t now_ms, bool force) {
-  if (!force && now_ms < next_hop_at_ms_) return;
-  next_hop_at_ms_ = now_ms + kHopIntervalMs;
-
-  hop_leader_id_ = selectHopLeader();
-  uint32_t leader_seed = hop_seed_;
-  uint32_t leader_seq = heartbeat_seq_;
-  if (hop_leader_id_ != static_cast<uint16_t>(node_id_ & 0xFFFF)) {
-    for (size_t i = 0; i < kMaxMembers; ++i) {
-      if (!members_[i].used || members_[i].node_id != hop_leader_id_) continue;
-      leader_seed = members_[i].hop_seed != 0 ? members_[i].hop_seed : hop_seed_;
-      leader_seq = members_[i].last_heartbeat_seq;
-      break;
+void LifeLinkLoRaNode::maybeApplyFrequencyHop(uint32_t /* now_ms */, bool /* force */) {
+  // ── Frequency hopping DISABLED — all nodes stay on base frequency ──
+  // This eliminates channel-mismatch issues during testing.
+  if (current_hop_channel_ != 0) {
+    const int rc = radio_.setFrequency(kHopChannelsMhz[0]);
+    if (rc == RADIOLIB_ERR_NONE) {
+      current_hop_channel_ = 0;
+      Serial.printf("[HOP] Disabled — locked to base freq=%.1f\n", kHopChannelsMhz[0]);
     }
-  }
-  if (!force && leader_seq == last_hop_seq_) return;
-  last_hop_seq_ = leader_seq;
-
-  const uint8_t next_ch = computeHopChannelIndex(leader_seed, leader_seq);
-  if (!force && next_ch == current_hop_channel_) return;
-  const int rc = radio_.setFrequency(kHopChannelsMhz[next_ch]);
-  if (rc == RADIOLIB_ERR_NONE) {
-    current_hop_channel_ = next_ch;
-    Serial.printf("[HOP] leader=0x%04X seed=0x%08lX seq=%lu ch=%u freq=%.1f\n",
-        hop_leader_id_, static_cast<unsigned long>(leader_seed),
-        static_cast<unsigned long>(leader_seq),
-        static_cast<unsigned>(current_hop_channel_),
-        kHopChannelsMhz[current_hop_channel_]);
   }
 }
 

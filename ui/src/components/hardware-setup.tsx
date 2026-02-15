@@ -59,10 +59,6 @@ export function HardwareSetup({
     }
   }, [connected, state.node_name]);
 
-  const selectedDevice = useMemo(
-    () => devices.find((d) => d.address === selectedAddress) ?? null,
-    [devices, selectedAddress],
-  );
   const registeredByAddress = useMemo(
     () =>
       new Set(
@@ -243,15 +239,6 @@ export function HardwareSetup({
               Disconnect Node
             </button>
           )}
-        </div>
-
-        <div className="mb-3 rounded-xl bg-[var(--foreground)]/[0.03] p-3 text-xs">
-          <div>Node ID: {state.node_id || "-"}</div>
-          <div>Name: {state.node_name || "-"}</div>
-          <div>BLE: {state.ble_address || selectedDevice?.address || "-"}</div>
-          <div className="mt-1 text-[var(--muted)]">
-            Hop leader {state.hop_leader || "-"} · ch {state.hop_channel} · {state.hop_frequency_mhz.toFixed(1)} MHz
-          </div>
         </div>
 
         <div className="mb-3 rounded-xl bg-[var(--foreground)]/[0.03] p-3">

@@ -84,17 +84,17 @@ class LifeLinkLoRaNode {
   static constexpr int kCodingRate = 5;
   static constexpr int kPreambleLength = 8;
   static constexpr int kSyncWord = 0x12;
-  static constexpr unsigned long kRxTimeoutMs = 3000;
+  static constexpr unsigned long kRxTimeoutMs = 1500;
 
   /* ── Protocol constants (aligned with simulation) ── */
   static constexpr size_t kBufferSize = 220;         // increased for gossip
-  static constexpr unsigned long kHeartbeatIntervalMs = 2000;
-  static constexpr unsigned long kHeartbeatJitterMs = 800;
-  static constexpr unsigned long kMembershipTimeoutMs = 30000;
+  static constexpr unsigned long kHeartbeatIntervalMs = 1500;
+  static constexpr unsigned long kHeartbeatJitterMs = 1500;
+  static constexpr unsigned long kMembershipTimeoutMs = 15000;
   static constexpr unsigned long kTestDataIntervalMs = 12000;
   static constexpr unsigned long kAckTimeoutMs = 12000;
   static constexpr uint8_t kDefaultTtl = 4;
-  static constexpr size_t kMaxGossipEntries = 6;     // matches sim MAX_GOSSIP_ENTRIES
+  static constexpr size_t kMaxGossipEntries = 12;    // blast full membership in every heartbeat
   static constexpr size_t kMaxMembers = 24;
   static constexpr size_t kMaxSeen = 64;
   static constexpr size_t kMaxTxQueue = 12;
@@ -102,6 +102,8 @@ class LifeLinkLoRaNode {
   static constexpr size_t kMaxMessageHistory = 64;
   static constexpr size_t kHopChannelCount = 2;
   static constexpr unsigned long kHopIntervalMs = 5000;
+  static constexpr unsigned long kDiscoverySweepIntervalMs = 10000; // return to ch0 every 10s
+  static constexpr unsigned long kDiscoverySweepDurationMs = 3000;  // stay on ch0 for 3s
 
   enum class PacketType : uint8_t {
     kHeartbeat = 1,
@@ -210,6 +212,9 @@ class LifeLinkLoRaNode {
   uint16_t local_msg_seq_ = 0;
   uint32_t next_heartbeat_at_ms_ = 0;
   uint32_t next_hop_at_ms_ = 0;
+  uint32_t next_discovery_sweep_at_ms_ = 0;
+  uint32_t discovery_sweep_end_ms_ = 0;
+  bool in_discovery_sweep_ = false;
   uint32_t next_test_data_at_ms_ = 0;
   uint32_t next_membership_print_at_ms_ = 0;
 

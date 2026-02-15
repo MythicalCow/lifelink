@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { SensorNode } from "@/types/sensor";
 import type {
   GatewayDevice,
+  GatewayMember,
   GatewayMessageHistory,
   GatewayState,
 } from "@/hooks/use-gateway-bridge";
@@ -16,6 +17,9 @@ export interface ChatMessage {
   timestamp: number;
   direction: "sent" | "received";
   status: "sending" | "routing" | "delivered" | "failed";
+  vital?: boolean;
+  intent?: string;
+  urgency?: number;
 }
 
 interface MessengerProps {
@@ -26,13 +30,14 @@ interface MessengerProps {
   gatewayOnline: boolean;
   gatewayState: GatewayState;
   gatewayDevices: GatewayDevice[];
+  gatewayMembers: GatewayMember[];
   gatewayLogs: string[];
   gatewayMessageHistory: GatewayMessageHistory[];
   onGatewayScan: () => Promise<GatewayDevice[]>;
   onGatewayConnect: (address: string) => Promise<void>;
   onGatewayDisconnect: () => Promise<void>;
   onGatewayCommand: (command: string) => Promise<void>;
-  onGatewayFetchMessages: () => Promise<GatewayMessageHistory[]>;
+  onGatewayFetchMembers: () => Promise<GatewayMember[]>;
 }
 
 function toHex(nodeIdNum: number): string {
@@ -51,19 +56,21 @@ export function Messenger({
   gatewayOnline,
   gatewayState,
   gatewayDevices,
+  gatewayMembers,
   gatewayLogs,
   gatewayMessageHistory,
   onGatewayScan,
   onGatewayConnect,
   onGatewayDisconnect,
   onGatewayCommand,
-  onGatewayFetchMessages,
+  onGatewayFetchMembers,
 }: MessengerProps) {
   const [selectedAddress, setSelectedAddress] = useState("");
   const [selectedReceiverHex, setSelectedReceiverHex] = useState("");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const connectedSenderHex = gatewayState.node_id?.toUpperCase() || "";
 
@@ -72,10 +79,6 @@ export function Messenger({
     [nodes],
   );
 
-  const senderNode = useMemo(
-    () => hardwareNodes.find((n) => n.hardwareIdHex?.toUpperCase() === connectedSenderHex) ?? null,
-    [connectedSenderHex, hardwareNodes],
-  );
   const nodeByAddress = useMemo(
     () =>
       new Map(
@@ -86,19 +89,61 @@ export function Messenger({
     [hardwareNodes],
   );
 
-  const receiverNodes = useMemo(
+  /* Receiver list comes from the connected node's mesh membership table. */
+  const receiverMembers = useMemo(
     () =>
-      hardwareNodes.filter(
-        (n) => n.hardwareIdHex && n.hardwareIdHex.toUpperCase() !== connectedSenderHex,
+      gatewayMembers.filter(
+        (m) => m.node_id.toUpperCase() !== connectedSenderHex,
       ),
-    [connectedSenderHex, hardwareNodes],
+    [connectedSenderHex, gatewayMembers],
   );
 
-  const resolveNodeLabel = (nodeIdNum: number): string => {
-    const hex = toHex(nodeIdNum);
+  const resolveNodeLabel = (hex: string): string => {
     const node = hardwareNodes.find((n) => n.hardwareIdHex?.toUpperCase() === hex);
-    return node ? nodeDisplayName(node) : hex;
+    if (node) return nodeDisplayName(node);
+    const member = gatewayMembers.find((m) => m.node_id.toUpperCase() === hex);
+    if (member && member.name) return member.name;
+    return `0x${hex}`;
   };
+
+  /* ── Merge hardware history into the unified chat list ── */
+  // Track which hardware history entries we've already ingested (by msg_id + direction)
+  const ingestedRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (gatewayMessageHistory.length === 0 || !connectedSenderHex) return;
+
+    const newMessages: ChatMessage[] = [];
+    for (const h of gatewayMessageHistory) {
+      const key = `hw-${h.direction}-${h.peer}-${h.msg_id}`;
+      if (ingestedRef.current.has(key)) continue;
+      ingestedRef.current.add(key);
+
+      const isSent = h.direction === "S";
+      const peerHex = h.peer.toUpperCase();
+      newMessages.push({
+        id: key,
+        fromNodeId: isSent ? parseInt(connectedSenderHex, 16) : parseInt(peerHex, 16),
+        toNodeId: isSent ? parseInt(peerHex, 16) : parseInt(connectedSenderHex, 16),
+        text: h.body,
+        timestamp: Date.now(),
+        direction: isSent ? "sent" : "received",
+        status: "delivered",
+        vital: h.vital,
+        intent: h.intent,
+        urgency: h.urgency,
+      });
+    }
+    if (newMessages.length > 0) {
+      setMessages((prev) => [...prev, ...newMessages]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gatewayMessageHistory, connectedSenderHex]);
+
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
 
   const canSend = Boolean(
     gatewayOnline &&
@@ -129,8 +174,7 @@ export function Messenger({
     try {
       await onGatewayConnect(target);
       await onGatewayCommand("WHOAMI");
-      await onGatewayCommand("STATUS");
-      await onGatewayFetchMessages();
+      await onGatewayFetchMembers();
       setSelectedAddress(target);
     } catch (err) {
       setError(String(err));
@@ -145,27 +189,30 @@ export function Messenger({
     const messageId = `msg-${++msgCounterRef.current}`;
     const fromNum = parseInt(connectedSenderHex, 16) || 0;
     const toNum = parseInt(selectedReceiverHex, 16) || 0;
-    const localMessage: ChatMessage = {
-      id: messageId,
-      fromNodeId: fromNum,
-      toNodeId: toNum,
-      text,
-      timestamp: Date.now(),
-      direction: "sent",
-      status: "routing",
-    };
 
-    setMessages((prev) => [...prev, localMessage]);
+    // Instantly add to chat and clear draft
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: messageId,
+        fromNodeId: fromNum,
+        toNodeId: toNum,
+        text,
+        timestamp: Date.now(),
+        direction: "sent",
+        status: "routing",
+      },
+    ]);
+    setDraft("");
     setBusy(true);
     setError("");
+
     try {
+      // Single command — no STATUS, no fetchMessages. Polling handles the rest.
       await onGatewayCommand(`SEND|${selectedReceiverHex}|${text}`);
-      await onGatewayCommand("STATUS");
-      await onGatewayFetchMessages();
       setMessages((prev) =>
         prev.map((m) => (m.id === messageId ? { ...m, status: "delivered" } : m)),
       );
-      setDraft("");
     } catch (err) {
       setMessages((prev) =>
         prev.map((m) => (m.id === messageId ? { ...m, status: "failed" } : m)),
@@ -178,10 +225,15 @@ export function Messenger({
 
   return (
     <div className="absolute inset-0 top-16 bottom-10 z-[500] flex flex-col">
+      {/* ── Connection / Receiver bar ── */}
       <div className="mx-auto w-full max-w-3xl px-4 py-3">
         <div className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
           <div className="mb-2 flex items-center justify-between">
-            <div className="text-[11px] font-semibold text-[var(--foreground)]">Send</div>
+            <div className="text-[11px] font-semibold text-[var(--foreground)]">
+              {gatewayState.connected
+                ? `Connected · ${gatewayState.node_name || `0x${connectedSenderHex}`}`
+                : "Not connected"}
+            </div>
             <button
               onClick={handleScan}
               disabled={!gatewayOnline || busy}
@@ -195,12 +247,13 @@ export function Messenger({
             To
           </div>
           <div className="mt-1 flex flex-wrap gap-2">
-            {receiverNodes.map((n) => {
-              const hex = (n.hardwareIdHex || "").toUpperCase();
+            {receiverMembers.map((m) => {
+              const hex = m.node_id.toUpperCase();
               const active = selectedReceiverHex === hex;
+              const label = m.name || `0x${hex}`;
               return (
                 <button
-                  key={`rx-${n.id}`}
+                  key={`rx-${hex}`}
                   onClick={() => setSelectedReceiverHex(hex)}
                   className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition-colors ${
                     active
@@ -208,12 +261,19 @@ export function Messenger({
                       : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
                   }`}
                 >
-                  {nodeDisplayName(n)}
+                  {label}
+                  {m.hops_away > 0 && (
+                    <span className="ml-1 text-[9px] opacity-60">
+                      {m.hops_away}h
+                    </span>
+                  )}
                 </button>
               );
             })}
-            {receiverNodes.length === 0 && (
-              <div className="text-[11px] text-[var(--muted)]">No receivers</div>
+            {receiverMembers.length === 0 && (
+              <div className="text-[11px] text-[var(--muted)]">
+                {gatewayState.connected ? "No mesh peers yet" : "Connect a sender to see mesh peers"}
+              </div>
             )}
           </div>
 
@@ -226,7 +286,6 @@ export function Messenger({
               const node = nodeByAddress.get(upperAddress);
               const isConnectedSender =
                 gatewayState.connected && gatewayState.ble_address.toUpperCase() === upperAddress;
-              const isSelected = selectedAddress.toUpperCase() === upperAddress;
               return (
                 <button
                   key={`sender-${d.address}`}
@@ -241,9 +300,7 @@ export function Messenger({
                   className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition-colors disabled:opacity-40 ${
                     isConnectedSender
                       ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30"
-                      : isSelected
-                        ? "bg-blue-500/10 text-blue-700 ring-blue-500/30"
-                        : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
+                      : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
                   }`}
                 >
                   {node ? nodeDisplayName(node) : d.name || "LifeLink"}
@@ -251,87 +308,82 @@ export function Messenger({
               );
             })}
             {gatewayDevices.length === 0 && (
-              <div className="text-[11px] text-[var(--muted)]">No senders</div>
+              <div className="text-[11px] text-[var(--muted)]">No senders — hit Scan</div>
             )}
-          </div>
-
-          <div className="mt-2 text-[10px] text-[var(--muted)]">
-            {gatewayOnline
-              ? gatewayState.connected
-                ? `Connected · 0x${connectedSenderHex}`
-                : "Gateway online"
-              : "Gateway offline"}
           </div>
         </div>
       </div>
 
+      {/* ── Unified chat window ── */}
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col overflow-hidden px-4">
-        <div className="mb-3 max-h-28 overflow-y-auto rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
-          <div className="mb-1 text-[10px] font-semibold tracking-wide text-[var(--muted)] uppercase">
-            Node Message History
-          </div>
-          {gatewayMessageHistory.length === 0 ? (
-            <div className="text-[11px] text-[var(--muted)]">No stored messages on this node yet.</div>
-          ) : (
-            <div className="space-y-1">
-              {gatewayMessageHistory.slice().reverse().slice(0, 12).map((m) => (
-                <div key={`hist-${m.idx}-${m.msg_id}`} className="text-[11px] text-[var(--foreground)]">
-                  <span className={`mr-1 rounded px-1.5 py-0.5 text-[10px] ${m.direction === "S" ? "bg-blue-500/10 text-blue-700" : "bg-emerald-500/10 text-emerald-700"}`}>
-                    {m.direction === "S" ? "Sent" : "Recv"}
-                  </span>
-                  <span className="mr-1 text-[var(--muted)]">0x{m.peer}</span>
-                  <span className="mr-1 rounded bg-[var(--foreground)]/[0.06] px-1.5 py-0.5 text-[10px]">
-                    {m.vital ? `VITAL ${m.intent} U${m.urgency}` : "CHAT"}
-                  </span>
-                  <span className="opacity-90">{m.body}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
         <div className="flex-1 overflow-y-auto rounded-xl bg-[var(--foreground)]/[0.02] p-3">
           {messages.length === 0 ? (
             <div className="flex h-full items-center justify-center text-sm text-[var(--muted)]">
-              No messages yet. Connect sender, pick receiver, send once.
+              No messages yet. Connect a sender, pick a receiver, and send.
             </div>
           ) : (
             <div className="space-y-2">
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className="rounded-lg bg-white px-3 py-2 text-xs shadow-sm ring-1 ring-[var(--foreground)]/[0.06]"
-                >
-                  <div className="text-[10px] text-[var(--muted)]">
-                    BLE {resolveNodeLabel(msg.fromNodeId)} -&gt; LoRa {resolveNodeLabel(msg.toNodeId)}
-                  </div>
-                  <div className="mt-0.5 text-[13px] text-[var(--foreground)]">{msg.text}</div>
+              {messages.map((msg) => {
+                const isSent = msg.direction === "sent";
+                const fromHex = toHex(msg.fromNodeId);
+                const toHex_ = toHex(msg.toNodeId);
+                return (
                   <div
-                    className={`mt-0.5 text-[10px] ${
-                      msg.status === "delivered"
-                        ? "text-green-600"
-                        : msg.status === "failed"
-                          ? "text-red-600"
-                          : "text-[var(--muted)]"
+                    key={msg.id}
+                    className={`rounded-lg px-3 py-2 text-xs shadow-sm ring-1 ring-[var(--foreground)]/[0.06] ${
+                      isSent ? "bg-blue-50 ml-8" : "bg-white mr-8"
                     }`}
                   >
-                    {msg.status}
+                    <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+                      <span className={`rounded px-1.5 py-0.5 font-medium ${
+                        isSent ? "bg-blue-500/10 text-blue-700" : "bg-emerald-500/10 text-emerald-700"
+                      }`}>
+                        {isSent ? "Sent" : "Recv"}
+                      </span>
+                      <span>{resolveNodeLabel(fromHex)} → {resolveNodeLabel(toHex_)}</span>
+                      {msg.vital && (
+                        <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-semibold text-red-600">
+                          VITAL {msg.intent} U{msg.urgency}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 text-[13px] text-[var(--foreground)]">{msg.text}</div>
+                    <div
+                      className={`mt-0.5 text-[10px] ${
+                        msg.status === "delivered"
+                          ? "text-green-600"
+                          : msg.status === "failed"
+                            ? "text-red-600"
+                            : "text-[var(--muted)]"
+                      }`}
+                    >
+                      {msg.status === "routing" ? "sending…" : msg.status}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
+              <div ref={chatEndRef} />
             </div>
           )}
         </div>
 
+        {/* ── Compose bar ── */}
         <div className="mt-3 rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
           <div className="flex items-center gap-2">
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void handleSend();
+                }
+              }}
               placeholder={
-                senderNode
+                gatewayState.connected
                   ? selectedReceiverHex
-                    ? `Send from ${nodeDisplayName(senderNode)} to ${selectedReceiverHex}`
-                    : "Select a receiver first"
+                    ? `Message to ${receiverMembers.find((m) => m.node_id.toUpperCase() === selectedReceiverHex)?.name || `0x${selectedReceiverHex}`}`
+                    : "Select a receiver above"
                   : "Connect a sender first"
               }
               disabled={!gatewayState.connected || !selectedReceiverHex || busy}
@@ -346,8 +398,8 @@ export function Messenger({
             </button>
           </div>
           {error && <div className="mt-2 text-[11px] text-red-600">{error}</div>}
-          <div className="mt-2 max-h-20 overflow-y-auto rounded-lg bg-slate-950 p-2 font-mono text-[10px] text-green-300">
-            {gatewayLogs.slice(0, 5).map((line, idx) => (
+          <div className="mt-2 max-h-16 overflow-y-auto rounded-lg bg-slate-950 p-2 font-mono text-[10px] text-green-300">
+            {gatewayLogs.slice(0, 4).map((line, idx) => (
               <div key={`${idx}-${line}`}>{line}</div>
             ))}
           </div>

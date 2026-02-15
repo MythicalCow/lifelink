@@ -143,9 +143,9 @@ export function useGatewayBridge() {
         method: "POST",
         body: JSON.stringify({ command: cmd }),
       });
-      await refreshState();
+      // Don't block on refreshState — the 500ms polling will catch up
     },
-    [api, refreshState],
+    [api],
   );
 
   useEffect(() => {
@@ -157,16 +157,14 @@ export function useGatewayBridge() {
 
   useEffect(() => {
     if (!state.connected) return;
-    void fetchMembers().catch(() => {
-      // connected node may be on older firmware without member commands
-    });
+    void fetchMembers().catch(() => {});
+    void fetchMessages().catch(() => {});
     const id = window.setInterval(() => {
-      void fetchMembers().catch(() => {
-        // keep polling best-effort
-      });
-    }, 2500);
+      void fetchMembers().catch(() => {});
+      void fetchMessages().catch(() => {});
+    }, 2000);
     return () => window.clearInterval(id);
-  }, [fetchMembers, state.connected]);
+  }, [fetchMembers, fetchMessages, state.connected]);
 
   return {
     online,
