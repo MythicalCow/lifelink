@@ -146,6 +146,7 @@ export default function Home() {
           onGatewayConnect={gateway.connect}
           onGatewayDisconnect={gateway.disconnect}
           onGatewayCommand={gateway.command}
+          onGatewayClearMessages={gateway.clearMessages}
         />
       )}
 

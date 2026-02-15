@@ -43,6 +43,7 @@ interface MessengerProps {
   onGatewayConnect: (address: string) => Promise<void>;
   onGatewayDisconnect: () => Promise<void>;
   onGatewayCommand: (command: string) => Promise<void>;
+  onGatewayClearMessages: () => Promise<void>;
 }
 
 function toHex(nodeIdNum: number): string {
@@ -94,6 +95,7 @@ export function Messenger({
   onGatewayConnect,
   onGatewayDisconnect,
   onGatewayCommand,
+  onGatewayClearMessages,
 }: MessengerProps) {
   const [selectedAddress, setSelectedAddress] = useState("");
   const [selectedReceiverHex, setSelectedReceiverHex] = useState("");
@@ -101,6 +103,7 @@ export function Messenger({
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [error, setError] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
   const connectedSenderHex = gatewayState.node_id?.toUpperCase() || "";
 
@@ -139,10 +142,15 @@ export function Messenger({
     setSelectedReceiverHex("");
   }, [connectedSenderHex, setMessages]);
 
-  // Auto-scroll
+  // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [gatewayLogs.length]);
 
   /* ── Derived ── */
   const canSend = Boolean(
@@ -159,7 +167,7 @@ export function Messenger({
     setBusyLabel("Refreshing messages…");
     setError("");
     try {
-      const res = await fetch("http://127.0.0.1:8765/messages?limit=60", {
+      const res = await fetch("http://127.0.0.1:8765/messages", {
         cache: "no-store",
         headers: { "Content-Type": "application/json" },
       });
@@ -206,6 +214,19 @@ export function Messenger({
     } catch (err) {
       setError(String(err));
       console.error("Failed to refresh messages:", err);
+    } finally {
+      setBusyLabel(null);
+    }
+  };
+
+  const handleClearMessages = async () => {
+    setBusyLabel("Clearing message cache…");
+    setError("");
+    try {
+      await onGatewayClearMessages();
+      setMessages([]);
+    } catch (err) {
+      setError(String(err));
     } finally {
       setBusyLabel(null);
     }
@@ -278,8 +299,6 @@ export function Messenger({
 
     try {
       await onGatewayCommand(`SEND|${selectedReceiverHex}|${text}`);
-      // Bug 5: ESP32 accepted the message into its TX queue. This does NOT
-      // mean the destination received it. Label as "sent" (not "delivered").
       setMessages((prev) =>
         prev.map((m) => (m.id === messageId ? { ...m, status: "sent" } : m)),
       );
@@ -295,209 +314,245 @@ export function Messenger({
 
   /* ── Render ── */
   return (
-    <div className="absolute inset-0 top-16 bottom-10 z-[500] flex flex-col">
-      {/* ── Loading overlay ── */}
-      {busyLabel && (
-        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-xl bg-white/70 backdrop-blur-sm">
-          <Spinner size={32} />
-          <span className="text-sm font-medium text-[var(--foreground)]">
-            {busyLabel}
-          </span>
+    <div className="absolute inset-0 top-16 bottom-10 z-[500] flex">
+
+      {/* ══════════ Left pane — Chat ══════════ */}
+      <div className="relative flex flex-1 flex-col overflow-hidden">
+        {/* ── Loading overlay (left pane only) ── */}
+        {busyLabel && (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-xl bg-white/70 backdrop-blur-sm">
+            <Spinner size={32} />
+            <span className="text-sm font-medium text-[var(--foreground)]">
+              {busyLabel}
+            </span>
+          </div>
+        )}
+        {/* ── Connection / Receiver bar ── */}
+        <div className="w-full px-4 py-3">
+          <div className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-[11px] font-semibold text-[var(--foreground)]">
+                {gatewayState.connected
+                  ? `Connected · ${gatewayState.node_name || `0x${connectedSenderHex}`}`
+                  : "Not connected"}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => void handleRefreshMessages()}
+                  disabled={!!busyLabel}
+                  className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
+                >
+                  Refresh Messages
+                </button>
+                <button
+                  onClick={() => void handleClearMessages()}
+                  disabled={!!busyLabel}
+                  className="rounded-lg bg-red-500/10 px-2.5 py-1 text-[11px] font-medium text-red-600 hover:bg-red-500/20 active:scale-95 transition disabled:pointer-events-none"
+                >
+                  Clear Cache
+                </button>
+                <button
+                  onClick={() => void handleScan()}
+                  disabled={!!busyLabel}
+                  className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
+                >
+                  Scan
+                </button>
+              </div>
+            </div>
+
+            <div className="text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
+              From
+            </div>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {gatewayDevices.map((d) => {
+                const upperAddr = d.address.toUpperCase();
+                const node = nodeByAddress.get(upperAddr);
+                const isActive =
+                  gatewayState.connected && gatewayState.ble_address.toUpperCase() === upperAddr;
+                return (
+                  <button
+                    key={`from-${d.address}`}
+                    disabled={!!busyLabel}
+                    onClick={() => {
+                      if (isActive) {
+                        void handleDisconnect();
+                        return;
+                      }
+                      void handleConnect(d.address);
+                    }}
+                    className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
+                      isActive
+                        ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30"
+                        : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
+                    }`}
+                  >
+                    {node ? nodeDisplayName(node) : d.name || "LifeLink"}
+                  </button>
+                );
+              })}
+              {gatewayDevices.length === 0 && (
+                <div className="text-[11px] text-[var(--muted)]">No senders — hit Scan</div>
+              )}
+            </div>
+
+            <div className="mt-3 text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
+              To
+            </div>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {receiverMembers.map((m) => {
+                const hex = m.node_id.toUpperCase();
+                const active = selectedReceiverHex === hex;
+                const label = m.name || `0x${hex}`;
+                return (
+                  <button
+                    key={`to-${hex}`}
+                    disabled={!!busyLabel}
+                    onClick={() => setSelectedReceiverHex(hex)}
+                    className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
+                      active
+                        ? "bg-[var(--accent)] text-white ring-[var(--accent)]"
+                        : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
+                    }`}
+                  >
+                    {label}
+                    {m.hops_away > 0 && (
+                      <span className="ml-1 text-[9px] opacity-60">{m.hops_away}h</span>
+                    )}
+                  </button>
+                );
+              })}
+              {receiverMembers.length === 0 && (
+                <div className="text-[11px] text-[var(--muted)]">
+                  {gatewayState.connected ? "No mesh peers yet" : "Connect a sender to see mesh peers"}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      )}
 
-      {/* ── Connection / Receiver bar ── */}
-      <div className="mx-auto w-full max-w-3xl px-4 py-3">
-        <div className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
-          <div className="mb-2 flex items-center justify-between">
-            <div className="text-[11px] font-semibold text-[var(--foreground)]">
-              {gatewayState.connected
-                ? `Connected · ${gatewayState.node_name || `0x${connectedSenderHex}`}`
-                : "Not connected"}
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => void handleRefreshMessages()}
-                disabled={!!busyLabel}
-                className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
-              >
-                Refresh Messages
-              </button>
-              <button
-                onClick={() => void handleScan()}
-                disabled={!!busyLabel}
-                className="rounded-lg bg-[var(--foreground)]/[0.06] px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/[0.10] active:scale-95 transition disabled:pointer-events-none"
-              >
-                Scan
-              </button>
-            </div>
-          </div>
-
-          <div className="text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
-            From
-          </div>
-          <div className="mt-1 flex flex-wrap gap-2">
-            {gatewayDevices.map((d) => {
-              const upperAddr = d.address.toUpperCase();
-              const node = nodeByAddress.get(upperAddr);
-              const isActive =
-                gatewayState.connected && gatewayState.ble_address.toUpperCase() === upperAddr;
-              return (
-                <button
-                  key={`from-${d.address}`}
-                  disabled={!!busyLabel}
-                  onClick={() => {
-                    if (isActive) {
-                      void handleDisconnect();
-                      return;
-                    }
-                    void handleConnect(d.address);
-                  }}
-                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
-                    isActive
-                      ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/30"
-                      : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
-                  }`}
-                >
-                  {node ? nodeDisplayName(node) : d.name || "LifeLink"}
-                </button>
-              );
-            })}
-            {gatewayDevices.length === 0 && (
-              <div className="text-[11px] text-[var(--muted)]">No senders — hit Scan</div>
-            )}
-          </div>
-
-          <div className="mt-3 text-[10px] font-medium tracking-wide text-[var(--muted)] uppercase">
-            To
-          </div>
-          <div className="mt-1 flex flex-wrap gap-2">
-            {receiverMembers.map((m) => {
-              const hex = m.node_id.toUpperCase();
-              const active = selectedReceiverHex === hex;
-              const label = m.name || `0x${hex}`;
-              return (
-                <button
-                  key={`to-${hex}`}
-                  disabled={!!busyLabel}
-                  onClick={() => setSelectedReceiverHex(hex)}
-                  className={`rounded-full px-3 py-1.5 text-[11px] ring-1 transition active:scale-95 disabled:pointer-events-none ${
-                    active
-                      ? "bg-[var(--accent)] text-white ring-[var(--accent)]"
-                      : "bg-white text-[var(--foreground)] ring-[var(--foreground)]/[0.12] hover:bg-[var(--foreground)]/[0.03]"
-                  }`}
-                >
-                  {label}
-                  {m.hops_away > 0 && (
-                    <span className="ml-1 text-[9px] opacity-60">{m.hops_away}h</span>
-                  )}
-                </button>
-              );
-            })}
-            {receiverMembers.length === 0 && (
-              <div className="text-[11px] text-[var(--muted)]">
-                {gatewayState.connected ? "No mesh peers yet" : "Connect a sender to see mesh peers"}
+        {/* ── Messages ── */}
+        <div className="flex flex-1 flex-col overflow-hidden px-4 pb-3">
+          <div className="flex-1 overflow-y-auto rounded-xl bg-[var(--foreground)]/[0.02] p-3">
+            {messages.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-[var(--muted)]">
+                No messages yet. Connect a sender, pick a receiver, and send.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {messages.map((msg) => {
+                  const isSent = msg.direction === "sent";
+                  const isAck = msg.text.startsWith("<ACK>");
+                  const fromHex = toHex(msg.fromNodeId);
+                  const toHex_ = toHex(msg.toNodeId);
+                  return (
+                    <div
+                      key={msg.id}
+                      className={`rounded-lg px-3 py-2 text-xs shadow-sm ring-1 ${
+                        isAck
+                          ? "bg-amber-50 ring-amber-300/40 mx-12"
+                          : isSent
+                            ? "bg-blue-50 ml-8 ring-[var(--foreground)]/[0.06]"
+                            : "bg-white mr-8 ring-[var(--foreground)]/[0.06]"
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-medium ${
+                            isAck
+                              ? "bg-amber-500/10 text-amber-700"
+                              : isSent
+                                ? "bg-blue-500/10 text-blue-700"
+                                : "bg-emerald-500/10 text-emerald-700"
+                          }`}
+                        >
+                          {isAck ? "ACK" : isSent ? "Sent" : "Recv"}
+                        </span>
+                        <span>
+                          {resolveNodeLabel(fromHex)} → {resolveNodeLabel(toHex_)}
+                        </span>
+                        {msg.vital && (
+                          <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-semibold text-red-600">
+                            VITAL {msg.intent} U{msg.urgency}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 text-[13px] text-[var(--foreground)]">{msg.text}</div>
+                    </div>
+                  );
+                })}
+                <div ref={chatEndRef} />
               </div>
             )}
+          </div>
+
+          {/* ── Compose bar ── */}
+          <div className="mt-3 rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
+            <div className="flex items-center gap-2">
+              <input
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleSend();
+                  }
+                }}
+                placeholder={
+                  gatewayState.connected
+                    ? selectedReceiverHex
+                      ? `Message to ${receiverMembers.find((m) => m.node_id.toUpperCase() === selectedReceiverHex)?.name || `0x${selectedReceiverHex}`}`
+                      : "Select a receiver above"
+                    : "Connect a sender first"
+                }
+                disabled={!!busyLabel}
+                className="h-10 flex-1 rounded-lg border border-[var(--foreground)]/[0.12] px-3 text-sm disabled:pointer-events-none"
+              />
+              <button
+                onClick={() => void handleSend()}
+                disabled={!canSend}
+                className="h-10 rounded-lg bg-[var(--accent)] px-4 text-sm font-semibold text-white transition active:scale-95 disabled:opacity-40"
+              >
+                Send
+              </button>
+            </div>
+            {error && <div className="mt-2 text-[11px] text-red-600">{error}</div>}
           </div>
         </div>
       </div>
 
-      {/* ── Chat ── */}
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col overflow-hidden px-4">
-        <div className="flex-1 overflow-y-auto rounded-xl bg-[var(--foreground)]/[0.02] p-3">
-          {messages.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-sm text-[var(--muted)]">
-              No messages yet. Connect a sender, pick a receiver, and send.
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {messages.map((msg) => {
-                const isSent = msg.direction === "sent";
-                const fromHex = toHex(msg.fromNodeId);
-                const toHex_ = toHex(msg.toNodeId);
-                return (
-                  <div
-                    key={msg.id}
-                    className={`rounded-lg px-3 py-2 text-xs shadow-sm ring-1 ring-[var(--foreground)]/[0.06] ${
-                      isSent ? "bg-blue-50 ml-8" : "bg-white mr-8"
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
-                      <span
-                        className={`rounded px-1.5 py-0.5 font-medium ${
-                          isSent
-                            ? "bg-blue-500/10 text-blue-700"
-                            : "bg-emerald-500/10 text-emerald-700"
-                        }`}
-                      >
-                        {isSent ? "Sent" : "Recv"}
-                      </span>
-                      <span>
-                        {resolveNodeLabel(fromHex)} → {resolveNodeLabel(toHex_)}
-                      </span>
-                      {msg.vital && (
-                        <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-semibold text-red-600">
-                          VITAL {msg.intent} U{msg.urgency}
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-1 text-[13px] text-[var(--foreground)]">{msg.text}</div>
-                    <div
-                      className={`mt-0.5 text-[10px] ${
-                        msg.status === "sent"
-                          ? "text-green-600"
-                          : msg.status === "failed"
-                            ? "text-red-600"
-                            : "text-[var(--muted)]"
-                      }`}
-                    >
-                      {msg.status === "queued" ? "sending…" : msg.status === "sent" ? "sent ✓" : msg.status}
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={chatEndRef} />
-            </div>
-          )}
+      {/* ══════════ Right pane — Gateway Log ══════════ */}
+      <div className="flex w-80 flex-col border-l border-[var(--foreground)]/[0.08] bg-slate-950">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
+          <span className="text-[11px] font-semibold tracking-wide text-slate-400 uppercase">
+            Gateway Log
+          </span>
+          <span className="text-[10px] tabular-nums text-slate-500">
+            {gatewayLogs.length} entries
+          </span>
         </div>
-
-        {/* ── Compose bar ── */}
-        <div className="mt-3 rounded-xl bg-white p-3 shadow-sm ring-1 ring-[var(--foreground)]/[0.06]">
-          <div className="flex items-center gap-2">
-            <input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void handleSend();
-                }
-              }}
-              placeholder={
-                gatewayState.connected
-                  ? selectedReceiverHex
-                    ? `Message to ${receiverMembers.find((m) => m.node_id.toUpperCase() === selectedReceiverHex)?.name || `0x${selectedReceiverHex}`}`
-                    : "Select a receiver above"
-                  : "Connect a sender first"
-              }
-              disabled={!!busyLabel}
-              className="h-10 flex-1 rounded-lg border border-[var(--foreground)]/[0.12] px-3 text-sm disabled:pointer-events-none"
-            />
-            <button
-              onClick={() => void handleSend()}
-              disabled={!canSend}
-              className="h-10 rounded-lg bg-[var(--accent)] px-4 text-sm font-semibold text-white transition active:scale-95 disabled:opacity-40"
-            >
-              Send
-            </button>
-          </div>
-          {error && <div className="mt-2 text-[11px] text-red-600">{error}</div>}
-          <div className="mt-2 max-h-16 overflow-y-auto rounded-lg bg-slate-950 p-2 font-mono text-[10px] text-green-300">
-            {gatewayLogs.slice(0, 4).map((line, idx) => (
-              <div key={`${idx}-${line}`}>{line}</div>
-            ))}
-          </div>
+        <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed text-green-400">
+          {gatewayLogs.length === 0 ? (
+            <div className="text-slate-600">No log entries yet.</div>
+          ) : (
+            <>
+              {[...gatewayLogs].reverse().map((line, idx) => (
+                <div
+                  key={`${idx}-${line}`}
+                  className={
+                    line.includes("TX:") ? "text-cyan-400" :
+                    line.includes("RX ") ? "text-green-400" :
+                    line.includes("Error") || line.includes("ERR") ? "text-red-400" :
+                    line.includes("---") ? "text-yellow-300/70" :
+                    "text-slate-400"
+                  }
+                >
+                  {line}
+                </div>
+              ))}
+              <div ref={logsEndRef} />
+            </>
+          )}
         </div>
       </div>
     </div>

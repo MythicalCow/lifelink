@@ -191,16 +191,10 @@ export function useGatewayBridge() {
 
       if (!bleConnected.current || epochRef.current !== myEpoch) return;
 
-      // 7. Immediate fetch — user sees members + messages RIGHT AWAY
+      // 7. Immediate fetch — members only; messages are user-initiated
       try {
         const md = await rawFetch<{ members: GatewayMember[] }>("/members?limit=60");
         if (epochRef.current === myEpoch) setMembers(md.members);
-      } catch {
-        /* poll will retry */
-      }
-      try {
-        const hd = await rawFetch<{ messages: GatewayMessageHistory[] }>("/messages?limit=60");
-        if (epochRef.current === myEpoch) setMessageHistory(hd.messages);
       } catch {
         /* poll will retry */
       }
@@ -236,6 +230,11 @@ export function useGatewayBridge() {
     },
     [rawFetch],
   );
+
+  const clearMessages = useCallback(async () => {
+    await rawFetch<{ ok: boolean }>("/clear-messages", { method: "POST" });
+    setMessageHistory([]);
+  }, [rawFetch]);
 
   /* ── Single polling loop ──
    *
@@ -284,18 +283,7 @@ export function useGatewayBridge() {
           if (isAbort(e) || epochRef.current !== myEpoch) return;
         }
 
-        // ── 3. Messages ──
-        try {
-          const hd = await rawFetch<{ messages: GatewayMessageHistory[] }>("/messages?limit=60", {
-            signal,
-          });
-          if (epochRef.current !== myEpoch) return;
-          setMessageHistory((prev) =>
-            messagesEqual(prev, hd.messages) ? prev : hd.messages,
-          );
-        } catch (e) {
-          if (isAbort(e) || epochRef.current !== myEpoch) return;
-        }
+        // Messages are fetched only on user request (Refresh Messages button)
       } finally {
         tickRunning.current = false;
       }
@@ -320,5 +308,6 @@ export function useGatewayBridge() {
     connect,
     disconnect,
     command,
+    clearMessages,
   };
 }

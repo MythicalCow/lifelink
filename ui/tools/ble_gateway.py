@@ -77,7 +77,7 @@ class BleGateway:
     self._logs: deque[str] = deque(maxlen=300)
     self._response_event = asyncio.Event()
     self._recent_devices: dict[str, tuple[dict[str, Any], float]] = {}
-    self._message_cache: list[dict[str, Any]] = []
+    self._message_cache: dict[str, dict[int, dict[str, Any]]] = {}
     self._member_cache: list[dict[str, Any]] = []
 
   def _log(self, line: str) -> None:
@@ -209,7 +209,6 @@ class BleGateway:
         self._state.ble_address = address
         self._state.ble_name = client.address
         self._state.last_response = ""
-        self._message_cache = []
         self._member_cache = []
         self._recent_devices[address] = (
             {
@@ -240,7 +239,6 @@ class BleGateway:
     """Quick disconnect — doesn't wait for BLE teardown."""
     if self._client is None:
       self._state = GatewayState()
-      self._message_cache = []
       self._member_cache = []
       return
 
@@ -250,7 +248,6 @@ class BleGateway:
     self._rx_char = None
     self._tx_char = None
     self._state = GatewayState()
-    self._message_cache = []
     self._member_cache = []
     self._log("BLE disconnecting...")
 
@@ -273,6 +270,11 @@ class BleGateway:
       await self._disconnect_inner_fast()
 
   async def send_command(self, command: str) -> None:
+    # SEND commands get the ACK-wait flow
+    if command.startswith("SEND|"):
+      await self._send_and_wait_for_ack(command)
+      return
+
     expected_prefixes: tuple[str, ...] = ()
     timeout_s = BLE_TIMEOUT_NORMAL
     attempts = 2
@@ -282,8 +284,6 @@ class BleGateway:
       expected_prefixes = ("OK|STATUS|",)
     elif command.startswith("NAME|"):
       expected_prefixes = ("OK|NAME|",)
-    elif command.startswith("SEND|"):
-      expected_prefixes = ("OK|SEND|", "ERR|SEND|")
     elif command == "HISTCOUNT":
       expected_prefixes = ("OK|HISTCOUNT|",)
     elif command.startswith("HISTGET|"):
@@ -294,78 +294,209 @@ class BleGateway:
       expected_prefixes = ("OK|MEM|", "ERR|MEM|")
     await self._send_and_wait_locked(command, expected_prefixes, timeout=timeout_s, attempts=attempts)
 
-  async def fetch_messages(self, limit: int = 40) -> list[dict[str, Any]]:
+  async def _send_and_wait_for_ack(self, command: str) -> None:
+    """Send a SEND| command once, then briefly check if the peer's
+    <ACK> comes back.  The send itself is never retried — once the
+    device says OK|SEND|queued the message is on the mesh.  We just
+    poll once to see if an ACK arrived quickly."""
+    ACK_WAIT = 1.0  # total seconds to wait for ACK after send
+
+    # Send the message
+    self._log(f"SEND: {command}")
+    resp = await self._send_and_wait_locked(
+        command, ("OK|SEND|", "ERR|SEND|"),
+        timeout=BLE_TIMEOUT_NORMAL, attempts=2,
+    )
+    if resp.startswith("ERR|SEND|"):
+      self._log(f"SEND rejected: {resp}")
+      raise RuntimeError(resp)
+
+    self._log("Message queued on mesh, waiting for ACK...")
+
+    # Record histcount right after our send is queued
+    try:
+      resp = await self._send_and_wait_locked(
+          "HISTCOUNT", ("OK|HISTCOUNT|",),
+          timeout=BLE_TIMEOUT_NORMAL, attempts=2,
+      )
+      baseline = int(resp.split("|")[2])
+    except Exception:
+      self._log("Could not read HISTCOUNT, skipping ACK check")
+      return
+
+    # Wait, then check if any new *received* <ACK> appeared
+    await asyncio.sleep(ACK_WAIT)
+
+    try:
+      resp = await self._send_and_wait_locked(
+          "HISTCOUNT", ("OK|HISTCOUNT|",),
+          timeout=BLE_TIMEOUT_NORMAL, attempts=2,
+      )
+      new_count = int(resp.split("|")[2])
+    except Exception:
+      self._log("ACK check failed (HISTCOUNT error)")
+      return
+
+    if new_count <= baseline:
+      self._log(f"No new messages after send (histcount {baseline}), ACK may arrive later")
+      return
+
+    # Scan new entries for a received <ACK>
+    for idx in range(baseline, new_count):
+      try:
+        r = await self._send_and_wait_locked(
+            f"HISTGET|{idx}", ("OK|HIST|",),
+            timeout=BLE_TIMEOUT_FAST, attempts=3,
+        )
+        row = r.split("|")
+        if len(row) < 10:
+          continue
+        direction = row[3]
+        hex_body = row[9]
+        try:
+          body = bytes.fromhex(hex_body).decode("utf-8", errors="replace")
+        except ValueError:
+          body = ""
+
+        # Cache every new entry we see
+        addr = self._state.ble_address
+        cache = self._message_cache.get(addr, {})
+        cache[idx] = {
+            "idx": int(row[2]), "direction": direction,
+            "peer": row[4].upper(), "msg_id": int(row[5]),
+            "vital": row[6] == "1", "intent": row[7],
+            "urgency": int(row[8]), "body": body,
+        }
+        self._message_cache[addr] = cache
+
+        if direction == "R" and body.startswith("<ACK>"):
+          self._log(f"ACK received: \"{body}\"")
+          return
+      except Exception:
+        pass
+
+    self._log(f"No ACK yet ({new_count - baseline} new message(s) were our own sends), ACK may arrive later")
+
+  async def fetch_messages(self) -> list[dict[str, Any]]:
+    WINDOW = 5  # only keep track of the last N messages
+
+    addr = self._state.ble_address
+    cache = self._message_cache.get(addr, {})
+
     if self._client is None or not self._client.is_connected or self._rx_char is None:
-      return self._message_cache[:]
+      return self._last_n_cached(cache, WINDOW)
 
     try:
       resp = await self._send_and_wait_locked("HISTCOUNT", ("OK|HISTCOUNT|",), timeout=BLE_TIMEOUT_NORMAL, attempts=2)
     except Exception:
-      return self._message_cache[:]
+      return self._last_n_cached(cache, WINDOW)
 
     parts = resp.split("|")
     if len(parts) < 3:
-      return self._message_cache[:]
+      return self._last_n_cached(cache, WINDOW)
     try:
       count = int(parts[2])
     except ValueError:
-      return self._message_cache[:]
+      return self._last_n_cached(cache, WINDOW)
 
     if count <= 0:
-      self._message_cache = []
       return []
 
-    # Poll every message — each HISTGET gets enough attempts to succeed
-    fresh: list[dict[str, Any]] = []
-    for idx in range(count):
+    # Only care about the last WINDOW indices
+    start = max(0, count - WINDOW)
+    target = list(range(start, count))
+    missing = [i for i in target if i not in cache]
+
+    if not missing:
+      return self._last_n_cached(cache, WINDOW)
+
+    # Fetch only the missing indices — only cache successful results
+    new_count = 0
+    failed: list[int] = []
+    for idx in missing:
       try:
         resp = await self._send_and_wait_locked(f"HISTGET|{idx}", ("OK|HIST|",), timeout=BLE_TIMEOUT_FAST, attempts=5)
       except Exception:
+        failed.append(idx)
         continue
       row = resp.split("|")
       # OK|HIST|idx|dir|peer|msg|vital|intent|urg|hexbody  (10 fields)
       if len(row) < 10:
+        failed.append(idx)
         continue
       hex_body = row[9]
       try:
         body = bytes.fromhex(hex_body).decode("utf-8", errors="replace")
       except ValueError:
         body = ""
-      fresh.append(
-          {
-              "idx": int(row[2]),
-              "direction": row[3],
-              "peer": row[4].upper(),
-              "msg_id": int(row[5]),
-              "vital": row[6] == "1",
-              "intent": row[7],
-              "urgency": int(row[8]),
-              "body": body,
-          }
-      )
+      cache[idx] = {
+          "idx": int(row[2]),
+          "direction": row[3],
+          "peer": row[4].upper(),
+          "msg_id": int(row[5]),
+          "vital": row[6] == "1",
+          "intent": row[7],
+          "urgency": int(row[8]),
+          "body": body,
+      }
+      new_count += 1
 
-    fresh_list = fresh
+    self._message_cache[addr] = cache
 
-    self._message_cache = fresh_list
+    # Log results
+    if new_count > 0 or failed:
+      self._log(f"--- Fetched {new_count} new, {len(failed)} failed, cached {len(cache)}/{count} for {addr} ---")
+      for idx in sorted(missing):
+        if idx in cache:
+          m = cache[idx]
+          direction = "SENT" if m["direction"] == "S" else "RECV"
+          vital_tag = " [VITAL]" if m["vital"] else ""
+          self._log(
+              f"  #{m['idx']} {direction} peer={m['peer']} "
+              f"msg_id={m['msg_id']}{vital_tag} "
+              f"intent={m['intent']} urg={m['urgency']} "
+              f"body=\"{m['body']}\""
+          )
+        else:
+          self._log(f"  #{idx} <err>")
+      self._log("--- End new messages ---")
 
-    # Log a plain text summary of the full message history
-    if fresh_list:
-      self._log(f"--- Message history ({len(fresh_list)} messages) ---")
-      for m in fresh_list:
-        direction = "SENT" if m["direction"] == "S" else "RECV"
-        vital_tag = " [VITAL]" if m["vital"] else ""
-        self._log(
-            f"  #{m['idx']} {direction} peer={m['peer']} "
-            f"msg_id={m['msg_id']}{vital_tag} "
-            f"intent={m['intent']} urg={m['urgency']} "
-            f"body=\"{m['body']}\""
+    # Auto-ACK: for each newly fetched *received* message whose body
+    # doesn't start with "<ACK>", send back an acknowledgement.
+    # The cache prevents re-ACKing — once fetched, the index won't
+    # appear in `missing` again.
+    for idx in sorted(missing):
+      m = cache.get(idx)
+      if m is None:
+        continue
+      if m["direction"] != "R":
+        continue
+      if m["body"].startswith("<ACK>"):
+        continue
+      peer = m["peer"]
+      preview = m["body"][:3]
+      ack_body = f"<ACK>{preview}"
+      try:
+        self._log(f"Auto-ACK to {peer}: {ack_body}")
+        await self._send_and_wait_locked(
+            f"SEND|{peer}|{ack_body}",
+            ("OK|SEND|", "ERR|SEND|"),
+            timeout=BLE_TIMEOUT_NORMAL, attempts=2,
         )
-      self._log("--- End message history ---")
-    else:
-      self._log("Message history: empty (0 messages)")
+      except Exception as exc:
+        self._log(f"Auto-ACK failed for #{idx}: {exc}")
 
-    clipped_limit = max(1, min(limit, 200))
-    return self._message_cache[-clipped_limit:]
+    # Return only the last WINDOW messages
+    return self._last_n_cached(cache, WINDOW)
+
+  @staticmethod
+  def _last_n_cached(cache: dict[int, dict[str, Any]], n: int) -> list[dict[str, Any]]:
+    """Return the last *n* entries from the cache, sorted by index."""
+    if not cache:
+      return []
+    keys = sorted(cache)
+    tail = keys[-n:] if len(keys) > n else keys
+    return [cache[k] for k in tail]
 
   async def fetch_members(self, limit: int = 40) -> list[dict[str, Any]]:
     if self._client is None or not self._client.is_connected or self._rx_char is None:
@@ -448,6 +579,11 @@ class BleGateway:
 
       return self._state.last_response
 
+  def clear_message_cache(self) -> None:
+    """Wipe the per-device message cache for all devices."""
+    self._message_cache.clear()
+    self._log("Message cache cleared.")
+
   def state(self) -> dict[str, Any]:
     return asdict(self._state)
 
@@ -504,10 +640,16 @@ async def state() -> dict[str, Any]:
   return {"state": gateway.state(), "busy": _ble_lock.locked(), "logs": gateway.logs()}
 
 
+@app.post("/clear-messages")
+async def clear_messages() -> dict[str, Any]:
+  gateway.clear_message_cache()
+  return {"ok": True}
+
+
 @app.get("/messages")
-async def messages(limit: int = 40) -> dict[str, Any]:
+async def messages() -> dict[str, Any]:
   try:
-    items = await gateway.fetch_messages(limit=max(1, min(limit, 200)))
+    items = await gateway.fetch_messages()
     return {"messages": items}
   except Exception as exc:
     raise HTTPException(status_code=400, detail=str(exc))
