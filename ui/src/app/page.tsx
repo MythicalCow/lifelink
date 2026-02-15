@@ -1,12 +1,10 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback } from "react";
 import { Header, type ViewMode } from "@/components/header";
 import { SensorField } from "@/components/sensor-field";
-import { SimControls } from "@/components/sim-controls";
 import { Messenger, type ChatMessage } from "@/components/messenger";
 import { HardwareSetup } from "@/components/hardware-setup";
-import { useSimulation } from "@/hooks/use-simulation";
 import { useGatewayBridge } from "@/hooks/use-gateway-bridge";
 import type { SensorNode } from "@/types/sensor";
 import {
@@ -22,41 +20,11 @@ export default function Home() {
   const [view, setView] = useState<ViewMode>("sensors"); // Start on sensors to add nodes
   const [nodes, setNodes] = useState<SensorNode[]>(INITIAL_NODES);
   const nextNodeId = useRef(1);
-
-  const sim = useSimulation(nodes);
   const gateway = useGatewayBridge();
 
   /* ── Lifted message state — persists across tab switches ── */
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const msgCounterRef = useRef(0);
-
-  /* ── Persist delivery / failure statuses back into messages ── */
-  useEffect(() => {
-    if (!sim.state) return;
-    const { deliveredTrackingIds, tick } = sim.state;
-
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMessages((prev) => {
-      let changed = false;
-      const next = prev.map((msg) => {
-        if (msg.status === "delivered" || msg.status === "failed") return msg;
-
-        if (deliveredTrackingIds.includes(msg.id)) {
-          changed = true;
-          return { ...msg, status: "delivered" as const };
-        }
-
-        // Timeout: if 60+ ticks without delivery, mark failed
-        if (tick - msg.timestamp > 60) {
-          changed = true;
-          return { ...msg, status: "failed" as const };
-        }
-
-        return msg;
-      });
-      return changed ? next : prev;
-    });
-  }, [sim.state]);
 
   /* ── Node configured via BLE (from Sensors tab) ── */
   const handleNodeConfigured = useCallback((config: {
@@ -93,9 +61,7 @@ export default function Home() {
   }, []);
 
   /* ── Derived counts ── */
-  const anchorCount = sim.state?.nodeStates.filter(
-    (n) => n.posConfidence === 1,
-  ).length ?? 0;
+  const anchorCount = nodes.filter((n) => n.isAnchor).length;
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[var(--surface)]">
@@ -110,21 +76,10 @@ export default function Home() {
       {view === "map" && (
         <>
           <SensorField
+            nodes={nodes}
             suggestions={SUGGESTED_NODES}
             center={MAP_CENTER}
             zoom={MAP_ZOOM}
-            simState={sim.state}
-          />
-
-          <SimControls
-            state={sim.state}
-            running={sim.running}
-            speed={sim.speed}
-            onPlay={sim.play}
-            onPause={sim.pause}
-            onStep={sim.stepOnce}
-            onToggleSpeed={sim.toggleSpeed}
-            onReset={sim.reset}
           />
         </>
       )}
@@ -140,10 +95,12 @@ export default function Home() {
           gatewayState={gateway.state}
           gatewayDevices={gateway.devices}
           gatewayLogs={gateway.logs}
+          gatewayMessageHistory={gateway.messageHistory}
           onGatewayScan={gateway.scan}
           onGatewayConnect={gateway.connect}
           onGatewayDisconnect={gateway.disconnect}
           onGatewayCommand={gateway.command}
+          onGatewayFetchMessages={gateway.fetchMessages}
         />
       )}
 
@@ -153,6 +110,7 @@ export default function Home() {
           online={gateway.online}
           state={gateway.state}
           devices={gateway.devices}
+          nodes={nodes}
           onScan={gateway.scan}
           onConnect={gateway.connect}
           onDisconnect={gateway.disconnect}

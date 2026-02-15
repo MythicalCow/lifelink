@@ -22,6 +22,17 @@ export interface GatewayDevice {
   rssi: number;
 }
 
+export interface GatewayMessageHistory {
+  idx: number;
+  direction: "S" | "R";
+  peer: string;
+  msg_id: number;
+  vital: boolean;
+  intent: string;
+  urgency: number;
+  body: string;
+}
+
 const GATEWAY_BASE = "http://127.0.0.1:8765";
 
 const DEFAULT_STATE: GatewayState = {
@@ -43,6 +54,7 @@ export function useGatewayBridge() {
   const [state, setState] = useState<GatewayState>(DEFAULT_STATE);
   const [logs, setLogs] = useState<string[]>([]);
   const [devices, setDevices] = useState<GatewayDevice[]>([]);
+  const [messageHistory, setMessageHistory] = useState<GatewayMessageHistory[]>([]);
 
   const api = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const res = await fetch(`${GATEWAY_BASE}${path}`, {
@@ -65,13 +77,15 @@ export function useGatewayBridge() {
       setOnline(true);
       setState(data.state);
       setLogs(data.logs);
+      return data.state;
     } catch {
       setOnline(false);
+      return null;
     }
   }, [api]);
 
   const scan = useCallback(async () => {
-    const data = await api<{ devices: GatewayDevice[] }>("/devices?timeout=4");
+    const data = await api<{ devices: GatewayDevice[] }>("/devices?timeout=2.2");
     setDevices(data.devices);
     return data.devices;
   }, [api]);
@@ -82,15 +96,28 @@ export function useGatewayBridge() {
         method: "POST",
         body: JSON.stringify({ address }),
       });
-      await refreshState();
+      let latest = await refreshState();
+      // Fast follow-up polling for async identity warmup after non-blocking connect.
+      for (let i = 0; i < 8; i += 1) {
+        if (latest?.node_id) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 120));
+        latest = await refreshState();
+      }
     },
     [api, refreshState],
   );
 
   const disconnect = useCallback(async () => {
     await api<{ ok: boolean }>("/disconnect", { method: "POST" });
+    setMessageHistory([]);
     await refreshState();
   }, [api, refreshState]);
+
+  const fetchMessages = useCallback(async () => {
+    const data = await api<{ messages: GatewayMessageHistory[] }>("/messages?limit=60");
+    setMessageHistory(data.messages);
+    return data.messages;
+  }, [api]);
 
   const command = useCallback(
     async (cmd: string) => {
@@ -106,7 +133,7 @@ export function useGatewayBridge() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshState();
-    const id = window.setInterval(refreshState, 1500);
+    const id = window.setInterval(refreshState, 500);
     return () => window.clearInterval(id);
   }, [refreshState]);
 
@@ -115,10 +142,12 @@ export function useGatewayBridge() {
     state,
     logs,
     devices,
+    messageHistory,
     scan,
     connect,
     disconnect,
     command,
+    fetchMessages,
     refreshState,
   };
 }

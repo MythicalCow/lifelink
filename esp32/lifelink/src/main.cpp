@@ -8,6 +8,24 @@ namespace {
 LifeLinkLoRaNode g_lora_node;
 LifeLinkBluetooth g_bluetooth;
 
+void hexEncode(const char* in, char* out, size_t out_size) {
+  static const char* kHex = "0123456789ABCDEF";
+  if (out_size == 0) {
+    return;
+  }
+  if (in == nullptr) {
+    out[0] = '\0';
+    return;
+  }
+  size_t j = 0;
+  for (size_t i = 0; in[i] != '\0' && j + 2 < out_size; ++i) {
+    const uint8_t b = static_cast<uint8_t>(in[i]);
+    out[j++] = kHex[(b >> 4) & 0x0F];
+    out[j++] = kHex[b & 0x0F];
+  }
+  out[j] = '\0';
+}
+
 void onBluetoothMessage(const char* msg, size_t len) {
   if (msg == nullptr || len == 0) {
     return;
@@ -64,6 +82,39 @@ void onBluetoothMessage(const char* msg, size_t len) {
     const uint16_t dst = static_cast<uint16_t>(strtoul(dst_s, nullptr, 16));
     const bool ok = g_lora_node.queueBleMessage(dst, body);
     g_bluetooth.sendText(ok ? "OK|SEND|queued" : "ERR|SEND|queue_full");
+    return;
+  }
+
+  if (strncmp(cmd, "HISTCOUNT", 9) == 0) {
+    char out[48];
+    snprintf(out, sizeof(out), "OK|HISTCOUNT|%u", static_cast<unsigned>(g_lora_node.messageHistoryCount()));
+    g_bluetooth.sendText(out);
+    return;
+  }
+
+  if (strncmp(cmd, "HISTGET|", 8) == 0) {
+    const uint16_t idx = static_cast<uint16_t>(strtoul(cmd + 8, nullptr, 10));
+    LifeLinkLoRaNode::MessageHistoryEntry entry{};
+    if (!g_lora_node.getMessageHistory(idx, &entry)) {
+      g_bluetooth.sendText("ERR|HIST|range");
+      return;
+    }
+    char body_hex[sizeof(entry.body) * 2 + 1];
+    hexEncode(entry.body, body_hex, sizeof(body_hex));
+    char out[220];
+    snprintf(
+        out,
+        sizeof(out),
+        "OK|HIST|%u|%c|%04X|%u|%u|%s|%u|%s",
+        static_cast<unsigned>(idx),
+        entry.direction,
+        static_cast<unsigned>(entry.peer),
+        static_cast<unsigned>(entry.msg_id),
+        entry.vital ? 1U : 0U,
+        entry.intent,
+        static_cast<unsigned>(entry.urgency),
+        body_hex);
+    g_bluetooth.sendText(out);
     return;
   }
 

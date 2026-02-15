@@ -332,6 +332,84 @@ void LifeLinkLoRaNode::setNodeName(const char* name) {
   node_name_[sizeof(node_name_) - 1] = '\0';
 }
 
+uint16_t LifeLinkLoRaNode::messageHistoryCount() const {
+  return history_count_;
+}
+
+bool LifeLinkLoRaNode::getMessageHistory(uint16_t idx, MessageHistoryEntry* out) const {
+  if (out == nullptr || idx >= history_count_) {
+    return false;
+  }
+  const uint16_t start =
+      static_cast<uint16_t>((history_head_ + kMaxMessageHistory - history_count_) % kMaxMessageHistory);
+  const uint16_t slot = static_cast<uint16_t>((start + idx) % kMaxMessageHistory);
+  *out = history_[slot];
+  return true;
+}
+
+void LifeLinkLoRaNode::appendHistory(
+    char direction,
+    uint16_t peer,
+    uint16_t msg_id,
+    const char* body,
+    const TriageOutput* triage) {
+  MessageHistoryEntry& entry = history_[history_head_];
+  entry.direction = direction;
+  entry.peer = peer;
+  entry.msg_id = msg_id;
+  entry.vital = (triage != nullptr) ? triage->is_vital : false;
+  entry.urgency = (triage != nullptr) ? triage->urgency : 0;
+  strncpy(entry.intent, (triage != nullptr) ? triage->intent.c_str() : "CHAT", sizeof(entry.intent) - 1);
+  entry.intent[sizeof(entry.intent) - 1] = '\0';
+  strncpy(entry.body, (body != nullptr) ? body : "", sizeof(entry.body) - 1);
+  entry.body[sizeof(entry.body) - 1] = '\0';
+
+  history_head_ = static_cast<uint16_t>((history_head_ + 1) % kMaxMessageHistory);
+  if (history_count_ < kMaxMessageHistory) {
+    ++history_count_;
+  }
+}
+
+TriageOutput LifeLinkLoRaNode::decodeTriageFromPayload(const char* body) const {
+  TriageOutput out{};
+  out.is_vital = false;
+  out.wire_payload = String((body != nullptr) ? body : "");
+  out.intent = String("CHAT");
+  out.urgency = 0;
+  out.flags = 0;
+  out.count = 0;
+  out.location = String("unknown");
+
+  if (body == nullptr || body[0] == '\0') {
+    return out;
+  }
+
+  const char* u_pos = strstr(body, "|U");
+  if (u_pos == nullptr) {
+    return out;
+  }
+
+  out.is_vital = true;
+  const char* first_sep = strchr(body, '|');
+  if (first_sep != nullptr) {
+    char intent_buf[12];
+    size_t n = static_cast<size_t>(first_sep - body);
+    if (n > sizeof(intent_buf) - 1) {
+      n = sizeof(intent_buf) - 1;
+    }
+    memcpy(intent_buf, body, n);
+    intent_buf[n] = '\0';
+    out.intent = String(intent_buf);
+  } else {
+    out.intent = String("INFO");
+  }
+  out.urgency = static_cast<uint8_t>(strtoul(u_pos + 2, nullptr, 10));
+  if (out.urgency > 3) {
+    out.urgency = 3;
+  }
+  return out;
+}
+
 bool LifeLinkLoRaNode::queueBleMessage(uint16_t dst, const char* text) {
   if (text == nullptr || text[0] == '\0') {
     return false;
@@ -363,6 +441,7 @@ bool LifeLinkLoRaNode::queueBleMessage(uint16_t dst, const char* text) {
   }
 
   addPendingData(msg_id, dst);
+  appendHistory('S', dst, msg_id, body_text.c_str(), &triage);
   Serial.printf(
       "[BLE->LORA] queued msg=%u to 0x%04X vital=%s intent=%s urg=%u payload=\"%s\"\n",
       msg_id,
@@ -415,6 +494,7 @@ void LifeLinkLoRaNode::sendTestDataIfPossible() {
       body_text.c_str());
   if (enqueueFrame(frame)) {
     addPendingData(msg_id, dst);
+    appendHistory('S', dst, msg_id, body_text.c_str(), &triage);
     Serial.printf(
         "[AI] queued DATA msg=%u -> 0x%04X vital=%s intent=%s urg=%u payload=\"%s\"\n",
         msg_id,
@@ -568,6 +648,8 @@ void LifeLinkLoRaNode::handleData(
         strstr(body, "|L") != nullptr) {
       Serial.println("[AI] received compact vital payload");
     }
+    const TriageOutput triage_meta = decodeTriageFromPayload(body);
+    appendHistory('R', origin, msg_id, body, &triage_meta);
 
     // Send ACK back to source (origin of DATA) via the same flooding relay behavior.
     const uint16_t ack_origin = node_id_;

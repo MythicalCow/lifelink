@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { MAP_CENTER, MAP_ZOOM } from "@/config/nodes";
 import type { GatewayDevice, GatewayState } from "@/hooks/use-gateway-bridge";
+import type { SensorNode } from "@/types/sensor";
 
 const LocationPicker = dynamic(
   () => import("@/components/location-picker").then((m) => m.LocationPicker),
@@ -14,6 +15,7 @@ interface HardwareSetupProps {
   state: GatewayState;
   online: boolean;
   devices: GatewayDevice[];
+  nodes: SensorNode[];
   onScan: () => Promise<GatewayDevice[]>;
   onConnect: (address: string) => Promise<void>;
   onDisconnect: () => Promise<void>;
@@ -32,6 +34,7 @@ export function HardwareSetup({
   state,
   online,
   devices,
+  nodes,
   onScan,
   onConnect,
   onDisconnect,
@@ -45,6 +48,7 @@ export function HardwareSetup({
   const [isAnchor, setIsAnchor] = useState(false);
   const [selectedLat, setSelectedLat] = useState<number | null>(null);
   const [selectedLng, setSelectedLng] = useState<number | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "synced" | "sync_error">("idle");
   const [error, setError] = useState("");
 
   const connected = state.connected;
@@ -58,6 +62,15 @@ export function HardwareSetup({
   const selectedDevice = useMemo(
     () => devices.find((d) => d.address === selectedAddress) ?? null,
     [devices, selectedAddress],
+  );
+  const registeredByAddress = useMemo(
+    () =>
+      new Set(
+        nodes
+          .map((n) => (n.bleAddress || "").toUpperCase())
+          .filter(Boolean),
+      ),
+    [nodes],
   );
 
   const handleScan = useCallback(async () => {
@@ -81,41 +94,47 @@ export function HardwareSetup({
     setIsConnecting(true);
     try {
       await onConnect(selectedAddress);
-      if (!state.node_id) {
-        await onCommand("WHOAMI");
+      try {
         await onCommand("STATUS");
+      } catch {
+        // best-effort identity refresh
       }
     } catch (err) {
       setError(String(err));
     } finally {
       setIsConnecting(false);
     }
-  }, [onCommand, onConnect, selectedAddress, state.node_id]);
+  }, [onCommand, onConnect, selectedAddress]);
 
-  const handleSaveConfig = useCallback(async () => {
+  const handleSaveConfig = useCallback(() => {
     if (!connected || !state.node_id || !nodeName.trim() || selectedLat === null || selectedLng === null) return;
     setError("");
-    try {
-      await onCommand(`NAME|${nodeName.trim()}`);
-      await onCommand("STATUS");
-      onNodeConfigured?.({
-        name: nodeName.trim(),
-        lat: selectedLat,
-        lng: selectedLng,
-        isAnchor,
-        hardwareIdHex: state.node_id.toUpperCase(),
-        bleAddress: state.ble_address,
-      });
-      // Streamline multi-node setup: save, then disconnect/reset for next node.
-      await onDisconnect();
-      setSelectedAddress("");
-      setSelectedLat(null);
-      setSelectedLng(null);
-      setIsAnchor(false);
-      setNodeName("");
-    } catch (err) {
-      setError(String(err));
-    }
+    setSaveStatus("saving");
+    const config = {
+      name: nodeName.trim(),
+      lat: selectedLat,
+      lng: selectedLng,
+      isAnchor,
+      hardwareIdHex: state.node_id.toUpperCase(),
+      bleAddress: state.ble_address,
+    };
+    onNodeConfigured?.(config);
+    setSelectedAddress("");
+    setSelectedLat(null);
+    setSelectedLng(null);
+    setIsAnchor(false);
+    setNodeName("");
+
+    void (async () => {
+      try {
+        await onCommand(`NAME|${config.name}`);
+        void onDisconnect();
+        setSaveStatus("synced");
+      } catch (err) {
+        setSaveStatus("sync_error");
+        setError(String(err));
+      }
+    })();
   }, [connected, isAnchor, nodeName, onCommand, onDisconnect, onNodeConfigured, selectedLat, selectedLng, state.ble_address, state.node_id]);
 
   return (
@@ -170,18 +189,44 @@ export function HardwareSetup({
           >
             {isScanning ? "Scanning..." : "Scan BLE Devices"}
           </button>
-          <select
-            value={selectedAddress}
-            onChange={(e) => setSelectedAddress(e.target.value)}
-            className="h-10 w-full rounded-lg border border-[var(--foreground)]/[0.12] bg-white px-3 text-xs"
-          >
-            <option value="">Select device</option>
-            {devices.map((d) => (
-              <option key={d.address} value={d.address}>
-                {d.name} ({d.address}) RSSI {d.rssi}
-              </option>
-            ))}
-          </select>
+          <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-[var(--foreground)]/[0.12] bg-white p-2">
+            {devices.length === 0 && (
+              <div className="px-2 py-1 text-xs text-[var(--muted)]">No devices found yet.</div>
+            )}
+            {devices.map((d) => {
+              const isSelected = selectedAddress === d.address;
+              const isRegistered = registeredByAddress.has(d.address.toUpperCase());
+              return (
+                <button
+                  key={d.address}
+                  type="button"
+                  onClick={() => setSelectedAddress(d.address)}
+                  className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition-colors ${
+                    isSelected
+                      ? "bg-[var(--accent)]/12 ring-1 ring-[var(--accent)]/30"
+                      : "hover:bg-[var(--foreground)]/[0.04]"
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        isRegistered
+                          ? "bg-emerald-500/15 text-emerald-700"
+                          : "bg-orange-400/20 text-orange-700"
+                      }`}
+                    >
+                      {isRegistered ? "Connected" : "Unregistered"}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-medium text-[var(--foreground)]">{d.name || "LifeLink"}</div>
+                      <div className="truncate text-[10px] text-[var(--muted)]">{d.address}</div>
+                    </div>
+                  </div>
+                  <span className="ml-2 text-[10px] text-[var(--muted)]">RSSI {d.rssi}</span>
+                </button>
+              );
+            })}
+          </div>
           {!connected ? (
             <button
               onClick={handleConnect}
@@ -228,6 +273,15 @@ export function HardwareSetup({
           >
             Save Node Config
           </button>
+          {saveStatus === "saving" && (
+            <div className="mt-2 text-[11px] text-[var(--muted)]">Saved locally. Syncing to node...</div>
+          )}
+          {saveStatus === "synced" && (
+            <div className="mt-2 text-[11px] text-emerald-600">Saved and synced.</div>
+          )}
+          {saveStatus === "sync_error" && (
+            <div className="mt-2 text-[11px] text-orange-600">Saved locally, but sync failed. Reconnect and retry.</div>
+          )}
         </div>
 
         {error && <div className="rounded-lg bg-red-500/10 p-2 text-xs text-red-600">{error}</div>}

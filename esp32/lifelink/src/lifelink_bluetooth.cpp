@@ -9,6 +9,7 @@
 #define CONNECT_TIMER_IDX   0
 #define CONNECT_TIMER_DIVIDER 80   // 80 MHz / 80 = 1 MHz (1 tick = 1 us)
 #define CONNECT_TIMER_PERIOD_US (30ULL * 1000 * 1000)  // 30 seconds
+#define ADV_RESTART_INTERVAL_MS 5000UL
 
 LifeLinkBluetooth* LifeLinkBluetooth::instance_ = nullptr;
 volatile bool LifeLinkBluetooth::timer_fired_ = false;
@@ -70,12 +71,16 @@ void LifeLinkBluetooth::begin() {
   BLEAdvertising* adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(BLE_UART_SERVICE_UUID);
   adv->setScanResponse(true);
+  // Faster discover/connect turnaround for rapid node-by-node setup.
+  adv->setMinInterval(0x20);  // ~20 ms
+  adv->setMaxInterval(0x40);  // ~40 ms
   adv->setMinPreferred(0x06);
   adv->setMaxPreferred(0x12);
 
   state_ = BtState::kDisconnected;
   device_connected_ = false;
   advertising_started_ = false;
+  last_adv_restart_ms_ = millis();
 
   // Timer interrupt: every 30 s set flag to try connect when disconnected
   connect_timer_ = timerBegin(CONNECT_TIMER_IDX, CONNECT_TIMER_DIVIDER, true);
@@ -135,6 +140,7 @@ void LifeLinkBluetooth::onClientDisconnect() {
   advertising_started_ = false;
   // Re-advertise immediately so setup can quickly switch to another node.
   startAdvertising();
+  last_adv_restart_ms_ = millis();
   state_ = BtState::kConnecting;
   Serial.println("[BT] Client disconnected; advertising resumed.");
 }
@@ -155,12 +161,24 @@ void LifeLinkBluetooth::runStateDisconnected() {
     return;
   timer_fired_ = false;
   startAdvertising();
+  last_adv_restart_ms_ = millis();
   state_ = BtState::kConnecting;
 }
 
 void LifeLinkBluetooth::runStateConnecting() {
   // Stay here until onClientConnect (Standby). No delay—return immediately
   // so loop() keeps ticking and LoRa can receive messages from other nodes.
+  if (device_connected_) {
+    return;
+  }
+  const unsigned long now = millis();
+  if (now - last_adv_restart_ms_ >= ADV_RESTART_INTERVAL_MS) {
+    // Self-heal: if BLE stack dropped advertising silently, force a restart.
+    advertising_started_ = false;
+    startAdvertising();
+    last_adv_restart_ms_ = now;
+    Serial.println("[BT] Advertising watchdog restart.");
+  }
 }
 
 void LifeLinkBluetooth::runStateStandby() {

@@ -70,4 +70,5 @@ class LifeLinkBluetooth {
   BLECharacteristic* tx_characteristic_ = nullptr;
   bool device_connected_ = false;
   bool advertising_started_ = false;
+  unsigned long last_adv_restart_ms_ = 0;
 };

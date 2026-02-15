@@ -2,13 +2,26 @@
 
 #include <Arduino.h>
 #include <RadioLib.h>
+#include "ai_triage.h"
 
 class LifeLinkLoRaNode {
  public:
+  struct MessageHistoryEntry {
+    char direction;
+    uint16_t peer;
+    uint16_t msg_id;
+    bool vital;
+    char intent[12];
+    uint8_t urgency;
+    char body[52];
+  };
+
   void begin();
   void tick();
   bool queueBleMessage(uint16_t dst, const char* text);
   void setNodeName(const char* name);
+  uint16_t messageHistoryCount() const;
+  bool getMessageHistory(uint16_t idx, MessageHistoryEntry* out) const;
   uint16_t nodeId16() const { return static_cast<uint16_t>(node_id_ & 0xFFFF); }
   const char* nodeName() const { return node_name_; }
   uint16_t hopLeaderId() const { return hop_leader_id_; }
@@ -54,6 +67,7 @@ class LifeLinkLoRaNode {
   static constexpr size_t kMaxSeen = 64;
   static constexpr size_t kMaxTxQueue = 12;
   static constexpr size_t kMaxPendingData = 12;
+  static constexpr size_t kMaxMessageHistory = 64;
   static constexpr size_t kHopChannelCount = 8;
   static constexpr unsigned long kHopIntervalMs = 5000;
 
@@ -123,6 +137,8 @@ class LifeLinkLoRaNode {
   void ackPendingData(uint16_t msg_id, uint16_t from);
   void expirePendingData();
   void printMembership() const;
+  void appendHistory(char direction, uint16_t peer, uint16_t msg_id, const char* body, const TriageOutput* triage);
+  TriageOutput decodeTriageFromPayload(const char* body) const;
 
   void runStateIdle();
   void runStateTx();
@@ -162,6 +178,9 @@ class LifeLinkLoRaNode {
   SeenEntry seen_[kMaxSeen] = {};
   TxFrame tx_queue_[kMaxTxQueue] = {};
   PendingData pending_data_[kMaxPendingData] = {};
+  MessageHistoryEntry history_[kMaxMessageHistory] = {};
+  uint16_t history_head_ = 0;
+  uint16_t history_count_ = 0;
   size_t tx_q_head_ = 0;
   size_t tx_q_tail_ = 0;
   size_t tx_q_size_ = 0;

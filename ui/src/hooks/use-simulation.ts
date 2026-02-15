@@ -79,6 +79,14 @@ export function useSimulation(sensorNodes: SensorNode[]) {
     }
   }, [state]);
 
+  // Keep simulator topology in sync with UI-configured nodes.
+  // Without this, nodes added in Setup do not appear on the map until manual reset.
+  useEffect(() => {
+    if (!simRef.current) return;
+    simRef.current.reset(sensorNodes);
+    setState({ ...simRef.current.getState(), running, speed });
+  }, [sensorNodes, running, speed]);
+
   return {
     state,
     running,
