@@ -351,6 +351,18 @@ export class MeshSimulator {
         discoveredLabels[nid] = entry.label;
       }
 
+      // Build bandit stats for visualization
+      const banditAllStats = node.bandit.getAllStats();
+      const banditStats: Record<string, { successCount: number; failureCount: number; totalAttempts: number; successRate: number }> = {};
+      for (const [key, stats] of Object.entries(banditAllStats)) {
+        banditStats[key] = {
+          successCount: stats.successCount,
+          failureCount: stats.failureCount,
+          totalAttempts: stats.totalAttempts,
+          successRate: stats.successRate,
+        };
+      }
+
       nodeStates.push({
         id: node.id,
         trueLat: node.trueLat,
@@ -365,6 +377,7 @@ export class MeshSimulator {
         trustedPeers: [...node.storage.trustedPeers.keys()],
         discoveredLabels,
         receivedMessages: [...node.receivedMessages],
+        banditStats: Object.keys(banditStats).length > 0 ? banditStats : undefined,
       });
     }
 
@@ -440,11 +453,12 @@ export class MeshSimulator {
   }
 
   private logPacketSend(sender: MeshNode, packet: MeshPacket): void {
-    if (packet.type === PacketType.HEARTBEAT) {
+    // Check if this is a gossip heartbeat message
+    if (packet.type === PacketType.DATA && packet.payload.startsWith("[GOSSIP]")) {
       if (this.tick % 10 === 0) {
         // Don't spam heartbeat logs — show every 10th tick.
         this.log(
-          `📡 ${sender.label} heartbeat (${packet.gossipEntries.length} gossip entries)`,
+          `📡 ${sender.label} heartbeat message sent`,
           "info",
         );
       }

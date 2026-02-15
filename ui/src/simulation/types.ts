@@ -90,6 +90,13 @@ export interface NodeVisualState {
     timestamp: number;
     hopCount: number;
   }>;
+  /** Bandit stats for message delivery: key = "frequency:recipientId" */
+  banditStats?: Record<string, {
+    successCount: number;
+    failureCount: number;
+    totalAttempts: number;
+    successRate: number;
+  }>;
 }
 
 /** An in-flight transmission for the UI */

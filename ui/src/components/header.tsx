@@ -29,7 +29,7 @@ export function Header({
           className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
             view === "map"
               ? "bg-white text-[var(--foreground)] shadow-sm"
-              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
+              : "text-[var(--foreground)]/70 hover:text-[var(--foreground)]/80"
           }`}
         >
           Map
@@ -39,7 +39,7 @@ export function Header({
           className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
             view === "nodes"
               ? "bg-white text-[var(--foreground)] shadow-sm"
-              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
+              : "text-[var(--foreground)]/70 hover:text-[var(--foreground)]/80"
           }`}
         >
           Nodes & Trust
@@ -49,7 +49,7 @@ export function Header({
           className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
             view === "sensors"
               ? "bg-white text-[var(--foreground)] shadow-sm"
-              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
+              : "text-[var(--foreground)]/70 hover:text-[var(--foreground)]/80"
           }`}
         >
           Setup
@@ -58,11 +58,11 @@ export function Header({
 
       {/* Status */}
       <nav className="flex items-center gap-5">
-        <span className="flex items-center gap-2 text-xs text-[var(--muted)]">
+        <span className="flex items-center gap-2 text-xs text-[var(--foreground)]/70">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
           {nodeCount} nodes
         </span>
-        <span className="flex items-center gap-2 text-xs text-[var(--muted)]/60">
+        <span className="flex items-center gap-2 text-xs text-[var(--foreground)]/60">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
           {anchorCount} anchors
         </span>

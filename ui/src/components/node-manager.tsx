@@ -487,13 +487,47 @@ export function NodeManager({
         {nodes.length > 0 && (
           <div className="p-4 border-b border-[var(--foreground)]/10 bg-blue-500/5">
             <div className="space-y-4">
+              {/* All Nodes List */}
+              <div className="rounded-xl border border-[var(--foreground)]/20 bg-[var(--foreground)]/5 p-4">
+                <h3 className="text-sm font-semibold mb-3">📍 All Nodes ({nodes.length})</h3>
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {nodes.map((node) => {
+                    const isMal = node.label?.startsWith("[MAL]");
+                    return (
+                      <div
+                        key={node.id}
+                        className={`flex items-center justify-between px-3 py-2 rounded border ${
+                          isMal
+                            ? "border-red-500/30 bg-red-500/10"
+                            : "border-[var(--foreground)]/10 bg-[var(--foreground)]/5"
+                        }`}
+                      >
+                        <div className="flex-1">
+                          <div className={`text-sm font-medium ${isMal ? "text-red-500" : ""}`}>
+                            {node.label || `Node ${node.id}`}
+                          </div>
+                          <div className="text-xs text-[var(--foreground)]/50">
+                            ID: {node.id}{node.isAnchor ? " • 🗺️ Anchor" : ""}
+                          </div>
+                        </div>
+                        {isMal && (
+                          <span className="text-xs px-2 py-1 bg-red-600/20 text-red-400 rounded font-medium">
+                            Malicious
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
               {/* Trust Graph Overview */}
               <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
                 <h3 className="text-sm font-semibold mb-3 text-blue-600">&#128274; Trust Graph Overview</h3>
                 <div className="grid grid-cols-3 gap-4">
                   <div className="text-center">
                     <div className="text-2xl font-bold text-[var(--foreground)]">{availableNodes.length}</div>
-                    <div className="text-xs text-[var(--foreground)]/60">Nodes</div>
+                    <div className="text-xs text-[var(--foreground)]/60">Regular Nodes</div>
                   </div>
                   <div className="text-center">
                     <div className="text-2xl font-bold text-blue-600">{totalConnections}</div>

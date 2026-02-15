@@ -175,7 +175,6 @@ export function Messenger({
   const [quickMinBytes, setQuickMinBytes] = useState(8);
   const [quickMaxBytes, setQuickMaxBytes] = useState(32);
   const [quickTTL, setQuickTTL] = useState(5); // TTL in ticks (default 5)
-  const [quickSamplingMode, setQuickSamplingMode] = useState<"uniform" | "random">("uniform");
   const [quickSenderMode, setQuickSenderMode] = useState<"selected" | "random">(
     "selected",
   );
@@ -192,6 +191,7 @@ export function Messenger({
   const sendRef = useRef<HTMLDivElement>(null);
   const receiveRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const payloadBytesCache = useRef<Map<string, Uint8Array>>(new Map());
   const textEncoder = useMemo(() => new TextEncoder(), []);
 
   const toggleExpandedMessage = useCallback((id: string) => {
@@ -208,18 +208,35 @@ export function Messenger({
 
   const getPayloadBytes = useCallback(
     (text: string) => {
+      // Check cache first
+      if (payloadBytesCache.current.has(text)) {
+        return payloadBytesCache.current.get(text)!;
+      }
+
       const parts = text.split(":");
       const tail = parts[parts.length - 1]?.trim() ?? "";
 
+      let result: Uint8Array;
       if (/^[0-9a-f]+$/i.test(tail) && tail.length >= 2 && tail.length % 2 === 0) {
         const bytes = new Uint8Array(tail.length / 2);
         for (let i = 0; i < tail.length; i += 2) {
           bytes[i / 2] = parseInt(tail.slice(i, i + 2), 16);
         }
-        return bytes;
+        result = bytes;
+      } else {
+        result = textEncoder.encode(text);
       }
 
-      return textEncoder.encode(text);
+      // Store in cache
+      payloadBytesCache.current.set(text, result);
+      
+      // Prevent cache from growing unbounded (keep last 500 items)
+      if (payloadBytesCache.current.size > 500) {
+        const firstKey = payloadBytesCache.current.keys().next().value;
+        payloadBytesCache.current.delete(firstKey);
+      }
+
+      return result;
     },
     [textEncoder],
   );
@@ -297,14 +314,16 @@ export function Messenger({
   }, [messages]);
 
   // Enrich with transient statuses
-  const enrichedMessages = messages.map((msg) => ({
-    ...msg,
-    status: displayStatus(msg, simState),
-  }));
+  const enrichedMessages = useMemo(() => {
+    return messages.map((msg) => ({
+      ...msg,
+      status: displayStatus(msg, simState),
+    }));
+  }, [messages, simState]);
 
   // Filter for current thread
-  const threadMessages =
-    selectedDest === "all"
+  const threadMessages = useMemo(() => {
+    return selectedDest === "all"
       ? enrichedMessages
       : selectedDest !== null
         ? enrichedMessages.filter(
@@ -315,13 +334,15 @@ export function Messenger({
                 m.toNodeId === activeGatewayId),
           )
         : [];
+  }, [enrichedMessages, selectedDest, activeGatewayId]);
 
-  const sentMessages = enrichedMessages.filter(
-    (msg) => msg.direction === "sent",
-  );
-  const receivedMessages = enrichedMessages.filter(
-    (msg) => msg.direction === "received",
-  );
+  const sentMessages = useMemo(() => {
+    return enrichedMessages.filter((msg) => msg.direction === "sent");
+  }, [enrichedMessages]);
+
+  const receivedMessages = useMemo(() => {
+    return enrichedMessages.filter((msg) => msg.direction === "received");
+  }, [enrichedMessages]);
 
   const handleSend = () => {
     if (
@@ -484,24 +505,16 @@ export function Messenger({
     }> = [];
 
     for (let i = 0; i < quickCount; i++) {
+      // Distribute offsets uniformly across the selected range
       let offset: number;
-      if (quickSamplingMode === "uniform") {
-        // Distribute offsets uniformly across the selected range so messages
-        // are spaced evenly instead of clustering due to random selection.
-        if (quickCount === 1) {
-          offset = quickMinOffset;
-        } else {
-          // Compute inclusive evenly-spaced integer offsets between min and max
-          const span = quickMaxOffset - quickMinOffset;
-          offset =
-            quickMinOffset +
-            Math.round((i * span) / Math.max(1, quickCount - 1));
-        }
+      if (quickCount === 1) {
+        offset = quickMinOffset;
       } else {
-        // Random sampling within the inclusive range
+        // Compute inclusive evenly-spaced integer offsets between min and max
+        const span = quickMaxOffset - quickMinOffset;
         offset =
           quickMinOffset +
-          Math.floor(Math.random() * (quickMaxOffset - quickMinOffset + 1));
+          Math.round((i * span) / Math.max(1, quickCount - 1));
       }
       const op =
         quickOpChoices[Math.floor(Math.random() * quickOpChoices.length)];
@@ -560,7 +573,7 @@ export function Messenger({
           <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4 pt-2"}>
             {allowAnyGateway && (
               <div className="flex items-center justify-between pb-2">
-                <span className="text-[10px] font-semibold tracking-wide text-[var(--muted)] uppercase">
+                <span className="text-[10px] font-semibold tracking-wide text-[var(--foreground)]/70 uppercase">
                   Gateway Mode
                 </span>
                 <div className="flex items-center gap-2 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
@@ -599,7 +612,7 @@ export function Messenger({
 
             <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
               {availableGateways.length === 0 ? (
-                <span className="text-[11px] text-[var(--muted)]">
+                <span className="text-[11px] text-[var(--foreground)]/70">
                   {gatewayMode === "any"
                     ? "No nodes available"
                     : `No nodes in BLE range (${BLE_RANGE_M}m)`}
@@ -628,7 +641,7 @@ export function Messenger({
                         {node.label}
                       </span>
                       <span className="flex items-center gap-2">
-                        <span className="text-[10px] tabular-nums text-[var(--muted)]">
+                        <span className="text-[10px] tabular-nums text-[var(--foreground)]/70">
                           {dist}m
                         </span>
                         {gatewayMode === "ble" && <BleIndicator dist={dist} />}
@@ -653,7 +666,7 @@ export function Messenger({
 
             <div className="rounded-xl border border-[var(--foreground)]/[0.06] bg-[var(--foreground)]/[0.03] p-3">
               <div className="mb-2.5 flex items-center justify-between gap-2">
-                <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--muted)]/70">Count messages</span>
+                <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--foreground)]/60">Count messages</span>
               </div>
 
               <div className="grid grid-cols-1 gap-2 text-[10px]">
@@ -671,7 +684,7 @@ export function Messenger({
 
               <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)] text-[9px]">Min</span>
+                  <span className="text-[var(--foreground)]/70 text-[9px]">Min</span>
                   <input
                     type="number"
                     min={0}
@@ -682,7 +695,7 @@ export function Messenger({
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)] text-[9px]">Max</span>
+                  <span className="text-[var(--foreground)]/70 text-[9px]">Max</span>
                   <input
                     type="number"
                     min={quickMinOffset}
@@ -695,38 +708,12 @@ export function Messenger({
               </div>
 
               <div className="mt-1 text-center">
-                <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--muted)]/70">Send delay range (ticks)</span>
-              </div>
-
-              <div className="mt-2 flex items-center gap-2 text-[10px]">
-                <span className="text-[9px] text-[var(--muted)]">Distribution</span>
-                <div className="flex items-center gap-1 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
-                  <button
-                    onClick={() => setQuickSamplingMode("uniform")}
-                    className={`rounded-full px-2 py-1 text-[10px] font-medium ${
-                      quickSamplingMode === "uniform"
-                        ? "bg-white text-[var(--foreground)]"
-                        : "text-[var(--muted)]"
-                    }`}
-                  >
-                    Uniform
-                  </button>
-                  <button
-                    onClick={() => setQuickSamplingMode("random")}
-                    className={`rounded-full px-2 py-1 text-[10px] font-medium ${
-                      quickSamplingMode === "random"
-                        ? "bg-white text-[var(--foreground)]"
-                        : "text-[var(--muted)]"
-                    }`}
-                  >
-                    Random
-                  </button>
-                </div>
+                <span className="text-[9px] font-semibold uppercase tracking-wide text-[var(--foreground)]/60">Send delay range (ticks)</span>
               </div>
 
               <div className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">Min bytes</span>
+                  <span className="text-[var(--foreground)]/70">Min bytes</span>
                   <input
                     type="number"
                     min={1}
@@ -737,7 +724,7 @@ export function Messenger({
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">Max bytes</span>
+                  <span className="text-[var(--foreground)]/70">Max bytes</span>
                   <input
                     type="number"
                     min={quickMinBytes}
@@ -748,7 +735,7 @@ export function Messenger({
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[var(--muted)]">TTL (ticks)</span>
+                  <span className="text-[var(--foreground)]/70">TTL (ticks)</span>
                   <input
                     type="number"
                     min={1}
@@ -763,14 +750,14 @@ export function Messenger({
 
               <div className="mt-3 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-[var(--muted)]">Sender</span>
+                  <span className="text-[10px] text-[var(--foreground)]/70">Sender</span>
                   <div className="flex items-center gap-1 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
                     <button
                       onClick={() => setQuickSenderMode("selected")}
                       className={`rounded-full px-2 py-1 text-[10px] font-medium ${
                         quickSenderMode === "selected"
                           ? "bg-white text-[var(--foreground)]"
-                          : "text-[var(--muted)]"
+                          : "text-[var(--foreground)]/70"
                       }`}
                     >
                       Selected
@@ -780,7 +767,7 @@ export function Messenger({
                       className={`rounded-full px-2 py-1 text-[10px] font-medium ${
                         quickSenderMode === "random"
                           ? "bg-white text-[var(--foreground)]"
-                          : "text-[var(--muted)]"
+                          : "text-[var(--foreground)]/70"
                       }`}
                     >
                       Random
@@ -794,7 +781,7 @@ export function Messenger({
                   className={`rounded-lg px-3 py-1.5 text-[10px] font-medium transition-colors ${
                     canQuickAdd
                       ? "bg-[var(--accent)] text-white"
-                      : "bg-[var(--foreground)]/[0.06] text-[var(--muted)]/50 cursor-not-allowed"
+                      : "bg-[var(--foreground)]/[0.06] text-[var(--foreground)]/50 cursor-not-allowed"
                   }`}
                 >
                   Queue Messages
@@ -808,7 +795,7 @@ export function Messenger({
                     className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] ${
                       quickOps[op.id]
                         ? "border-blue-500/40 bg-blue-500/10 text-blue-600"
-                        : "border-[var(--foreground)]/[0.08] text-[var(--muted)]"
+                        : "border-[var(--foreground)]/[0.08] text-[var(--foreground)]/70"
                     }`}
                   >
                     <input

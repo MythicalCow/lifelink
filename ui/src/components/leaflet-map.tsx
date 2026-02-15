@@ -59,14 +59,12 @@ function txColor(tx: Transmission): string {
   if (tx.radioType === "BLE") {
     return "#0ea5e9"; // bright cyan/blue
   } else {
-    // LoRa uses green shades, varying by intensity
-    // Heartbeats are darker green, Data packets are brighter green
-    if (tx.packetType === PacketType.HEARTBEAT) {
-      return "#16a34a"; // medium-dark green
-    } else if (tx.packetType === PacketType.ACK) {
-      return "#4ade80"; // lighter green
+    // LoRa uses green shades
+    // ACKs are lighter green, Data/Heartbeat messages are brighter green
+    if (tx.packetType === PacketType.ACK) {
+      return "#4ade80"; // lighter green for ACKs
     } else {
-      return "#22c55e"; // bright green
+      return "#22c55e"; // bright green for DATA (includes heartbeats)
     }
   }
 }
@@ -75,8 +73,6 @@ function txOpacity(tx: Transmission): number {
   if (tx.status === "collision") return 0.75;
   if (tx.status === "captured") return 0.8;
   if (tx.status === "jammed") return 0.65;
-  // Much higher opacity for heartbeats so they're visible
-  if (tx.packetType === PacketType.HEARTBEAT) return 0.45;
   return 0.7;
 }
 
@@ -84,7 +80,7 @@ function txWeight(tx: Transmission): number {
   if (tx.status === "collision") return 2.6;
   if (tx.status === "captured") return 2.8;
   if (tx.status === "jammed") return 2.4;
-  return tx.packetType === PacketType.HEARTBEAT ? 1.5 : 2.5;
+  return 2.5;
 }
 
 function txDashArray(tx: Transmission): string | undefined {
@@ -131,7 +127,7 @@ export function LeafletMap({
             <span className="text-xs font-semibold text-[var(--foreground)]">Transmission Legend</span>
             <button
               onClick={() => setShowLegend(false)}
-              className="text-[var(--muted)] hover:text-[var(--foreground)] text-xs"
+              className="text-[var(--foreground)]/70 hover:text-[var(--foreground)] text-xs"
             >
               ✕
             </button>
@@ -171,11 +167,7 @@ export function LeafletMap({
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <div className="text-[8px] font-bold text-[var(--muted)]">━━━</div>
-                  <span className="text-[10px] text-[var(--foreground)]">Data/ACK</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="text-[8px] font-light text-[var(--muted)]">━━━</div>
-                  <span className="text-[10px] text-[var(--foreground)]">Heartbeat</span>
+                  <span className="text-[10px] text-[var(--foreground)]">Data/Heartbeat/ACK</span>
                 </div>
               </div>
             </div>

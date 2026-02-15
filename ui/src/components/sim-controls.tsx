@@ -33,7 +33,7 @@ export function SimControls({
         <span className="text-xs font-semibold tracking-wide text-[var(--foreground)]/70 uppercase">
           Mesh Simulation
         </span>
-        <span className="text-[10px] tabular-nums text-[var(--muted)]">
+        <span className="text-[10px] tabular-nums text-[var(--foreground)]/70">
           tick {state?.tick ?? 0}
         </span>
       </div>
@@ -60,7 +60,7 @@ export function SimControls({
         </button>
         <button
           onClick={onReset}
-          className="flex h-8 w-16 items-center justify-center rounded-lg bg-[var(--foreground)]/5 text-xs text-[var(--muted)] transition-colors hover:bg-[var(--foreground)]/10"
+          className="flex h-8 w-16 items-center justify-center rounded-lg bg-[var(--foreground)]/5 text-xs text-[var(--foreground)]/70 transition-colors hover:bg-[var(--foreground)]/10"
         >
           Reset
         </button>
@@ -111,7 +111,7 @@ function Stat({ label, value }: { label: string; value: string | number }) {
       <span className="text-sm font-semibold tabular-nums text-[var(--foreground)]">
         {value}
       </span>
-      <span className="text-[9px] text-[var(--muted)]">{label}</span>
+      <span className="text-[9px] text-[var(--foreground)]/70">{label}</span>
     </div>
   );
 }

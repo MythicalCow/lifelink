@@ -104,6 +104,7 @@ export class MaliciousNode extends MeshNode {
         originLat: this.estLat,
         originLng: this.estLng,
         gossipEntries: [],
+        radioType: "LoRa",
       });
     }
   }
@@ -114,32 +115,46 @@ export class MaliciousNode extends MeshNode {
   private executeLying(currentTick: number): void {
     // Randomly decide to lie this tick
     if (this.rng() < this.intensity * 0.1) {
-      // Send heartbeat with false position
+      // Send heartbeat with false position as a DATA message
       const fakeLat = this.estLat + (this.rng() - 0.5) * 0.01;
       const fakeLng = this.estLng + (this.rng() - 0.5) * 0.01;
 
+      const gossipEntries = [
+        {
+          nodeId: this.id,
+          sequenceNum: currentTick,
+          hopsAway: 0,
+          lat: fakeLat,
+          lng: fakeLng,
+          posConfidence: 1.0, // Claim high confidence
+          label: this.label,
+        },
+      ];
+
+      const gossipPayload = JSON.stringify(gossipEntries);
+      const packetId = `${this.id}-lie-${currentTick}`;
+
       this.txQueue.push({
-        id: `${this.id}-lie-${currentTick}`,
-        type: PacketType.HEARTBEAT,
+        id: packetId,
+        type: PacketType.DATA,
         sourceId: this.id,
         destId: BROADCAST,
         nextHop: BROADCAST,
         ttl: 1,
         hopCount: 0,
-        payload: "",
+        payload: `[GOSSIP]${gossipPayload}`,
         originLat: fakeLat,
         originLng: fakeLng,
-        gossipEntries: [
-          {
-            nodeId: this.id,
-            sequenceNum: currentTick,
-            hopsAway: 0,
-            lat: fakeLat,
-            lng: fakeLng,
-            posConfidence: 1.0, // Claim high confidence
-            label: this.label,
-          },
-        ],
+        gossipEntries: [],
+        radioType: "LoRa",
+      });
+
+      // Track as pending (though attacks don't expect ACKs)
+      this.pendingMessages.set(packetId, {
+        destId: BROADCAST,
+        recipientId: BROADCAST,
+        sentTick: currentTick,
+        frequency: 1,
       });
     }
   }
@@ -156,32 +171,51 @@ export class MaliciousNode extends MeshNode {
       }
     }
 
-    // Broadcast heartbeats for each fake identity
+    // Broadcast gossip messages for each fake identity
     for (const sybilId of this.sybilIdentities) {
       if (this.rng() < 0.1) {
         // 10% chance per tick per identity
+        const fakePos = {
+          lat: this.estLat + (this.rng() - 0.5) * 0.005,
+          lng: this.estLng + (this.rng() - 0.5) * 0.005,
+        };
+
+        const gossipEntries = [
+          {
+            nodeId: sybilId,
+            sequenceNum: currentTick,
+            hopsAway: 0,
+            lat: fakePos.lat,
+            lng: fakePos.lng,
+            posConfidence: 1.0,
+            label: `[SYBIL]${sybilId}`,
+          },
+        ];
+
+        const gossipPayload = JSON.stringify(gossipEntries);
+        const packetId = `${sybilId}-sybil-${currentTick}`;
+
         this.txQueue.push({
-          id: `${sybilId}-sybil-${currentTick}`,
-          type: PacketType.HEARTBEAT,
+          id: packetId,
+          type: PacketType.DATA,
           sourceId: sybilId,
           destId: BROADCAST,
           nextHop: BROADCAST,
           ttl: 1,
           hopCount: 0,
-          payload: "",
-          originLat: this.estLat + (this.rng() - 0.5) * 0.005,
-          originLng: this.estLng + (this.rng() - 0.5) * 0.005,
-          gossipEntries: [
-            {
-              nodeId: sybilId,
-              sequenceNum: currentTick,
-              hopsAway: 0,
-              lat: this.estLat,
-              lng: this.estLng,
-              posConfidence: 0.8,
-              label: `Sybil-${sybilId}`,
-            },
-          ],
+          payload: `[GOSSIP]${gossipPayload}`,
+          originLat: fakePos.lat,
+          originLng: fakePos.lng,
+          gossipEntries: [],
+          radioType: "LoRa",
+        });
+
+        // Track as pending
+        this.pendingMessages.set(packetId, {
+          destId: BROADCAST,
+          recipientId: BROADCAST,
+          sentTick: currentTick,
+          frequency: 1,
         });
       }
     }

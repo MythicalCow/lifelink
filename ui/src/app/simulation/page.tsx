@@ -5,6 +5,7 @@ import { Header, type ViewMode } from "@/components/header";
 import { SensorField } from "@/components/sensor-field";
 import { SimControls } from "@/components/sim-controls";
 import { Messenger, type ChatMessage } from "@/components/messenger";
+import { BanditVisualization } from "@/components/bandit-visualization";
 import { Sensors } from "@/components/sensors";
 import { NodeManager } from "@/components/node-manager";
 import { useSimulation, type SimulationHook } from "@/hooks/use-simulation";
@@ -27,12 +28,13 @@ export default function SimulationPage() {
   const [view, setView] = useState<ViewMode>("nodes"); // Start on nodes tab
   const [nodes, setNodes] = useState<SensorNode[]>(INITIAL_NODES);
   const nextNodeId = useRef(1);
-  const [showMessages, setShowMessages] = useState(false);
+  const [panelMode, setPanelMode] = useState<"hidden" | "messages" | "bandit" | "both">("hidden");
   const [messagesWide, setMessagesWide] = useState(false);
   const [showGodMode, setShowGodMode] = useState(false);
   const [trustedOnlyRouting, setTrustedOnlyRouting] = useState(false);
   const [mapKey, setMapKey] = useState(0);
   const [pendingQuickSetup, setPendingQuickSetup] = useState<QuickSetupPending | null>(null);
+  const trustMapRef = useRef<Record<number, number[]>>({});
 
   const sim: SimulationHook = useSimulation(nodes);
 
@@ -144,8 +146,9 @@ export default function SimulationPage() {
     maliciousTypes: { type: string; count: number }[];
     density: number;
   }) => {
-    // Clear existing nodes
+    // Clear existing nodes and trust map
     setNodes([]);
+    trustMapRef.current = {};
     nextNodeId.current = 1;
 
     // Generate random positions in Stanford area
@@ -205,6 +208,7 @@ export default function SimulationPage() {
 
   const handleClearAll = useCallback(() => {
     setNodes([]);
+    trustMapRef.current = {};
     nextNodeId.current = 1;
     setPendingQuickSetup(null);
   }, []);
@@ -214,6 +218,8 @@ export default function SimulationPage() {
     if (!sim.state) return;
     const simulator = sim.simRef.current;
     if (simulator) {
+      // Save the trust map so it can be restored if the simulator resets
+      trustMapRef.current = trustMap;
       simulator.setTrustGraphFromMap(trustMap);
       sim.refreshState();
     }
@@ -249,8 +255,52 @@ export default function SimulationPage() {
     }
 
     sim.refreshState();
+    
+    // Save the newly configured trust graph so it persists across resets
+    if (sim.state) {
+      const newTrustMap: Record<number, number[]> = {};
+      for (const nodeState of sim.state.nodeStates) {
+        newTrustMap[nodeState.id] = nodeState.trustedPeers ?? [];
+      }
+      trustMapRef.current = newTrustMap;
+    }
+    
     setPendingQuickSetup(null);
   }, [nodes.length, pendingQuickSetup, sim, sim.state]);
+
+  /* ── Preserve trust graph when adding a single node ── */
+  useEffect(() => {
+    // If we have a saved trust map and the simulator is ready
+    if (Object.keys(trustMapRef.current).length === 0 || !sim.simRef.current || !sim.state) return;
+    
+    // Check if the simulator has nodes (means reset happened)
+    if (sim.state.nodeStates.length === 0) return;
+    
+    // Check if we need to restore: simulator is ready but trust is missing
+    // (This happens after reset clears the trust graph)
+    const hasActiveTrust = sim.state.nodeStates.some((n) => n.trustedPeers.length > 0);
+    const savedTrustExists = Object.values(trustMapRef.current).some((peers) => peers.length > 0);
+    
+    // Only restore if: we have saved trust, but simulator has no trust, and all saved nodes exist
+    if (!hasActiveTrust && savedTrustExists && nodes.length === sim.state.nodeStates.length) {
+      // Filter trust map to only include nodes that still exist
+      const filteredTrustMap: Record<number, number[]> = {};
+      for (const [nodeId, peers] of Object.entries(trustMapRef.current)) {
+        const numId = Number(nodeId);
+        if (nodes.some((n) => n.id === numId)) {
+          filteredTrustMap[numId] = peers.filter((peerId) => 
+            nodes.some((n) => n.id === peerId)
+          );
+        }
+      }
+      
+      if (Object.keys(filteredTrustMap).length > 0) {
+        sim.simRef.current.setTrustGraphFromMap(filteredTrustMap);
+        sim.refreshState();
+        // Keep trustMapRef.current for future resets
+      }
+    }
+  }, [nodes, sim]);
 
   const trustMap = useMemo(() => {
     const map: Record<number, number[]> = {};
@@ -279,27 +329,28 @@ export default function SimulationPage() {
         <div className="absolute inset-0 top-16 flex flex-col">
           <div className="flex flex-wrap items-center justify-end gap-2 border-b border-[var(--foreground)]/10 bg-[var(--surface)]/90 px-4 py-2 text-[10px] backdrop-blur">
             <button
-              onClick={() => setShowMessages((prev) => !prev)}
+              onClick={() => {
+                setPanelMode((prev) => {
+                  if (prev === "hidden") return "messages";
+                  if (prev === "messages") return "bandit";
+                  if (prev === "bandit") return "both";
+                  return "hidden";
+                });
+              }}
               className={`rounded-lg px-3 py-1.5 font-medium shadow-sm transition-all ${
-                showMessages
-                  ? "bg-sky-500/90 text-white"
-                  : "bg-white/80 text-[var(--muted)] hover:bg-white"
+                panelMode === "hidden"
+                  ? "bg-white/80 text-[var(--muted)] hover:bg-white"
+                  : panelMode === "messages"
+                    ? "bg-sky-500/90 text-white"
+                    : panelMode === "bandit"
+                      ? "bg-purple-500/90 text-white"
+                      : "bg-indigo-500/90 text-white"
               }`}
             >
-              {showMessages ? "💬 Hide Messages" : "💬 Show Messages"}
-            </button>
-            <button
-              onClick={() => setMessagesWide((prev) => !prev)}
-              disabled={!showMessages}
-              className={`rounded-lg px-3 py-1.5 font-medium shadow-sm transition-all ${
-                showMessages
-                  ? messagesWide
-                    ? "bg-blue-500/90 text-white"
-                    : "bg-white/80 text-[var(--muted)] hover:bg-white"
-                  : "bg-white/40 text-[var(--muted)]/40 cursor-not-allowed"
-              }`}
-            >
-              {messagesWide ? "↔ Equal Split" : "↔ Focus Messages"}
+              {panelMode === "hidden" && "📊 Show Panel"}
+              {panelMode === "messages" && "💬 Show Bandit"}
+              {panelMode === "bandit" && "📈 Show Both"}
+              {panelMode === "both" && "✕ Hide"}
             </button>
             <button
               onClick={() => setMapKey((prev) => prev + 1)}
@@ -328,16 +379,17 @@ export default function SimulationPage() {
             >
               {trustedOnlyRouting ? "🔒 Trusted Routing ON" : "🔓 Trusted Routing OFF"}
             </button>
+
           </div>
 
           <div className="flex min-h-0 flex-1">
             <div
               className={`relative min-h-0 ${
-                showMessages
-                  ? messagesWide
-                    ? "w-2/5"
+                panelMode === "hidden"
+                  ? "w-full"
+                  : panelMode === "both"
+                    ? "w-1/3"
                     : "w-1/2"
-                  : "w-full"
               }`}
             >
               <SensorField
@@ -349,11 +401,9 @@ export default function SimulationPage() {
               />
             </div>
 
-            {showMessages && (
+            {(panelMode === "messages" || panelMode === "both") && (
               <div
-                className={`min-h-0 overflow-hidden border-l border-[var(--foreground)]/10 bg-[var(--surface)] ${
-                  messagesWide ? "w-3/5" : "w-1/2"
-                }`}
+                className="min-h-0 flex-1 overflow-hidden border-l border-[var(--foreground)]/10 bg-[var(--surface)]"
               >
                 <div className="h-full">
                   <Messenger
@@ -366,6 +416,20 @@ export default function SimulationPage() {
                     onRefresh={handleRefreshMessages}
                     variant="panel"
                     allowAnyGateway
+                  />
+                </div>
+              </div>
+            )}
+
+            {(panelMode === "bandit" || panelMode === "both") && (
+              <div
+                className="min-h-0 flex-1 overflow-auto border-l border-[var(--foreground)]/10 bg-[var(--surface)]"
+              >
+                <div className="h-full p-4">
+                  <BanditVisualization
+                    simState={sim.state}
+                    sensorNodes={nodes}
+                    title="Message Delivery Bandit Tracking"
                   />
                 </div>
               </div>

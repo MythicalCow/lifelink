@@ -27,6 +27,7 @@ import {
   trilaterate,
   type AnchorReading,
 } from "./utils";
+import { BanditTracker } from "./bandit-tracker";
 
 /** Radio interface type */
 export type RadioType = "LoRa" | "BLE";
@@ -138,6 +139,17 @@ export class MeshNode {
   /** Outbound queue — simulator pulls from this */
   txQueue: MeshPacket[] = [];
 
+  /** Bandit tracker for message delivery success/failure on (frequency, recipient) pairs */
+  bandit: BanditTracker = new BanditTracker();
+
+  /** Track pending sends for correlation with delivery confirmations */
+  protected pendingMessages: Map<string, { 
+    destId: number; 
+    recipientId: number; 
+    sentTick: number;
+    frequency: number; 
+  }> = new Map();
+
   constructor(
     id: number,
     trueLat: number,
@@ -174,7 +186,7 @@ export class MeshNode {
 
   /* ── Tick ──────────────────────────────────────────── */
 
-  /** Called once per simulation tick. May enqueue a heartbeat. */
+  /** Called once per simulation tick. May enqueue a heartbeat message. */
   tick(currentTick: number): void {
     // Store current tick for message timestamping
     this.currentTick = currentTick;
@@ -187,14 +199,24 @@ export class MeshNode {
       }
     }
 
+    // Check for pending messages that have timed out (no ACK received)
+    const pendingTimeout = 100; // ticks
+    for (const [packetId, pending] of this.pendingMessages) {
+      if (currentTick - pending.sentTick > pendingTimeout) {
+        // Message didn't get ACK within timeout, record as failure
+        this.bandit.recordAttempt(pending.frequency, pending.recipientId, false, currentTick);
+        this.pendingMessages.delete(packetId);
+      }
+    }
+
     // Attempt trilateration if not an anchor and we have readings
     if (!this.isAnchor) {
       this.attemptTrilateration();
     }
 
-    // Beacon timer
+    // Beacon timer: send heartbeat as a regular broadcast message
     if (currentTick >= this.nextBeaconTick) {
-      this.txQueue.push(this.createHeartbeat());
+      this.enqueueHeartbeatMessage();
       this.nextBeaconTick =
         currentTick +
         BEACON_INTERVAL +
@@ -302,98 +324,91 @@ export class MeshNode {
     if (packet.nextHop !== BROADCAST && packet.nextHop !== this.id) return null;
 
     switch (packet.type) {
-      case PacketType.HEARTBEAT:
-        this.processHeartbeat(packet, rssi, currentTick);
-        return null;
-
       case PacketType.DATA:
         return this.processData(packet);
 
       case PacketType.ACK:
-        // ACKs are consumed silently (logged by simulator)
+        // ACKs are consumed and update bandit tracker
+        this.processAck(packet, currentTick);
+        return null;
+
+      // HEARTBEAT is no longer used - heartbeats are now regular DATA messages
+      default:
         return null;
     }
   }
 
-  /* ── Heartbeat / Gossip ─────────────────────────────  */
+  /**
+   * Process an incoming ACK to update delivery success in bandit tracker
+   */
+  private processAck(packet: MeshPacket, currentTick: number): void {
+    // ACK payload is "ACK:<originalPacketId>"
+    const ackMatch = packet.payload.match(/ACK:(.+)/);
+    if (!ackMatch) return;
+    
+    const originalPacketId = ackMatch[1];
+    const pending = this.pendingMessages.get(originalPacketId);
+    
+    if (!pending) return;
+    
+    // Update bandit tracker with success using stored frequency
+    this.bandit.recordAttempt(pending.frequency, pending.recipientId, true, currentTick);
+    
+    // Clean up pending message
+    this.pendingMessages.delete(originalPacketId);
+  }
 
-  private createHeartbeat(): MeshPacket {
-    this.seqNum++;
-    const entries = this.getGossipEntries();
-    return {
-      id: `${this.id}-${this.packetCounter++}`,
-      type: PacketType.HEARTBEAT,
+  /* ── Heartbeat as Regular Message ──────────────────── */
+
+  /**
+   * Enqueue a heartbeat as a regular broadcast DATA message.
+   * This triggers normal ACK-based delivery confirmation and bandit learning.
+   * The message payload contains gossip information.
+   */
+  private enqueueHeartbeatMessage(): void {
+    // Build gossip entries
+    const gossipEntries = this.getGossipEntries();
+    
+    // Serialize gossip into payload (JSON)
+    const gossipPayload = JSON.stringify(gossipEntries);
+    
+    // Send as broadcast DATA message
+    // Using BROADCAST as destination, which will be sent to all neighbors
+    const packetId = `${this.id}-${this.packetCounter++}`;
+    const frequency = 1; // Direct broadcast to neighbors
+    
+    // Track as pending for delivery confirmation
+    // Use a special marker in payload to identify heartbeat
+    this.pendingMessages.set(packetId, {
+      destId: BROADCAST,
+      recipientId: BROADCAST, // We'll track success if any neighbor acks
+      sentTick: this.currentTick,
+      frequency,
+    });
+    
+    this.txQueue.push({
+      id: packetId,
+      type: PacketType.DATA,
       sourceId: this.id,
       destId: BROADCAST,
       nextHop: BROADCAST,
-      ttl: 1,
+      ttl: 1, // Heartbeats don't relay
       hopCount: 0,
-      payload: "",
-      // Use ESTIMATED position in packets (what we believe, not truth)
+      payload: `[GOSSIP]${gossipPayload}`,
       originLat: this.estLat,
       originLng: this.estLng,
-      gossipEntries: entries,
-      // Heartbeats use LoRa by default (broadcast to everyone)
+      gossipEntries: [], // Gossip is in payload, not in packet metadata
       radioType: "LoRa",
-    };
-  }
-
-  private processHeartbeat(
-    packet: MeshPacket,
-    rssi: number,
-    currentTick: number,
-  ): void {
-    // Note: FTM ranging is done separately by the simulator.
-    // RSSI is still used for link quality estimation but not positioning.
-
-    // Resolve sender's info from their self-entry in gossip
-    const senderSelf = packet.gossipEntries.find(
-      (e) => e.nodeId === packet.sourceId,
-    );
-    const senderLabel = senderSelf?.label ?? `Node ${packet.sourceId}`;
-    const senderConfidence = senderSelf?.posConfidence ?? 0;
-
-    // Direct neighbor entry — position from gossip (their estimate)
-    this.neighborTable.set(packet.sourceId, {
-      nodeId: packet.sourceId,
-      sequenceNum: this.seqNum,
-      hopsAway: 1,
-      lastSeenTick: currentTick,
-      rssi,
-      lat: packet.originLat,
-      lng: packet.originLng,
-      posConfidence: senderConfidence,
-      viaNode: packet.sourceId,
-      label: senderLabel,
     });
 
-    // Process piggybacked gossip
-    for (const entry of packet.gossipEntries) {
-      if (entry.nodeId === this.id) continue;
-      const newHops = entry.hopsAway + 1;
-      const existing = this.neighborTable.get(entry.nodeId);
-
-      const shouldUpdate =
-        !existing ||
-        existing.sequenceNum < entry.sequenceNum ||
-        (existing.sequenceNum === entry.sequenceNum &&
-          existing.hopsAway > newHops);
-
-      if (shouldUpdate) {
-        this.neighborTable.set(entry.nodeId, {
-          nodeId: entry.nodeId,
-          sequenceNum: entry.sequenceNum,
-          hopsAway: newHops,
-          lastSeenTick: currentTick,
-          rssi: rssi * 0.6, // degraded estimate
-          lat: entry.lat,
-          lng: entry.lng,
-          posConfidence: entry.posConfidence * 0.9, // degrade confidence
-          viaNode: packet.sourceId,
-          label: entry.label,
-        });
-      }
-    }
+    this.sentMessages.push({
+      id: packetId,
+      toNodeId: BROADCAST,
+      text: "[Gossip Heartbeat]",
+      timestamp: this.currentTick,
+      status: "sent",
+      hopCount: 0,
+    });
   }
 
   private getGossipEntries(): GossipEntry[] {
@@ -429,6 +444,37 @@ export class MeshNode {
   /* ── Data Routing ──────────────────────────────────── */
 
   private processData(packet: MeshPacket): MeshPacket | null {
+    // Check if this is a gossip heartbeat message
+    if (packet.payload.startsWith("[GOSSIP]")) {
+      try {
+        const gossipJson = packet.payload.substring(8); // Remove "[GOSSIP]" prefix
+        const gossipEntries: GossipEntry[] = JSON.parse(gossipJson);
+        
+        // Process gossip from heartbeat
+        this.processGossipHeartbeat(packet, gossipEntries, this.currentTick);
+      } catch {
+        // Malformed gossip, ignore but still ACK
+      }
+      
+      // Still return ACK so the sender learns this heartbeat message was delivered
+      return {
+        ...packet,
+        id: `${this.id}-ack-${this.packetCounter++}`,
+        type: PacketType.ACK,
+        sourceId: this.id,
+        destId: packet.sourceId,
+        nextHop: BROADCAST, // ACK is best-effort broadcast
+        ttl: MAX_TTL,
+        hopCount: 0,
+        payload: `ACK:${packet.id}`,
+        originLat: this.estLat,
+        originLng: this.estLng,
+        gossipEntries: [],
+        radioType: packet.radioType,
+      };
+    }
+
+    // Regular message delivery
     // Delivered!
     if (packet.destId === this.id) {
       // Store the received message (strip tracking ID from payload)
@@ -474,6 +520,63 @@ export class MeshNode {
       ttl: packet.ttl - 1,
       hopCount: packet.hopCount + 1,
     };
+  }
+
+  /**
+   * Process gossip entries from a heartbeat message
+   */
+  private processGossipHeartbeat(
+    packet: MeshPacket,
+    gossipEntries: GossipEntry[],
+    currentTick: number,
+  ): void {
+    // Update neighbor entry for sender
+    const senderSelf = gossipEntries.find(
+      (e) => e.nodeId === packet.sourceId,
+    );
+    const senderLabel = senderSelf?.label ?? `Node ${packet.sourceId}`;
+    const senderConfidence = senderSelf?.posConfidence ?? 0;
+
+    this.neighborTable.set(packet.sourceId, {
+      nodeId: packet.sourceId,
+      sequenceNum: senderSelf?.sequenceNum ?? 0,
+      hopsAway: 1,
+      lastSeenTick: currentTick,
+      rssi: 0, // Not available from DATA packet
+      lat: packet.originLat,
+      lng: packet.originLng,
+      posConfidence: senderConfidence,
+      viaNode: packet.sourceId,
+      label: senderLabel,
+    });
+
+    // Process piggybacked gossip from other nodes
+    for (const entry of gossipEntries) {
+      if (entry.nodeId === this.id) continue;
+      const newHops = entry.hopsAway + 1;
+      const existing = this.neighborTable.get(entry.nodeId);
+
+      const shouldUpdate =
+        !existing ||
+        existing.sequenceNum < entry.sequenceNum ||
+        (existing.sequenceNum === entry.sequenceNum &&
+          existing.hopsAway > newHops);
+
+      if (shouldUpdate) {
+        this.neighborTable.set(entry.nodeId, {
+          nodeId: entry.nodeId,
+          sequenceNum: entry.sequenceNum,
+          hopsAway: newHops,
+          lastSeenTick: currentTick,
+          rssi: 0, // degraded estimate not applicable
+          lat: entry.lat,
+          lng: entry.lng,
+          posConfidence: entry.posConfidence * 0.9, // degrade confidence
+          viaNode: packet.sourceId,
+          label: entry.label,
+        });
+      }
+    }
   }
 
   /** Geographic + Gradient routing to pick next hop */
@@ -596,6 +699,18 @@ export class MeshNode {
     const radioType = nextHop !== BROADCAST 
       ? this.determineRadioType(nextHop)
       : "LoRa"; // Broadcast fallback uses LoRa
+    
+    // Determine frequency: 1 for direct (single hop), 2 for routed/broadcast (multihop)
+    const neighbor = this.neighborTable.get(nextHop);
+    const frequency = (nextHop !== BROADCAST && neighbor && neighbor.hopsAway === 1) ? 1 : 2;
+    
+    // Track pending message for delivery confirmation
+    this.pendingMessages.set(packetId, {
+      destId,
+      recipientId: destId,
+      sentTick: this.currentTick,
+      frequency,
+    });
     
     this.txQueue.push({
       id: packetId,
