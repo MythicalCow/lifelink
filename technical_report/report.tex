@@ -1,0 +1,157 @@
+\documentclass[10pt, twocolumn, letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{margin=0.75in}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{shapes, arrows.meta, positioning, fit, calc}
+
+% Title and Author
+\title{\textbf{LifeLink: Resilient Mesh Communication in Spectrally Contested Environments \\ via Semantic Compression and Economic Asymmetry}}
+
+\author{
+  \textbf{The LifeLink Team} \\
+  Stanford TreeHacks 2026 \\
+  \texttt{raghavt3@illinois.edu} \\
+  \texttt{tkoduru@umich.edu} \\
+  \texttt{rohan@WPI.edu} \\
+  \texttt{vijay@stanford.edu} \\
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+In modern conflict zones and disaster scenarios, civilians face a dual threat: the physical destruction of infrastructure and the active suppression of wireless communications. Adversaries increasingly deploy jamming to deny Wi-Fi/Cellular connectivity and GPS spoofing to disrupt navigation. We present \textbf{LifeLink}, a decentralized communication architecture designed for these Anti-Access/Area Denial (A2/AD) environments. By utilizing LoRa (915 MHz) hardware, we bypass high-frequency jamming, but incur severe bandwidth constraints. To solve this, we introduce \textit{Semantic Compression}—an edge-AI triage system that reduces natural language to 8-byte payloads. We further demonstrate that LifeLink creates an "Asymmetric Cost Exchange," where the financial and tactical cost to jam the network effectively exceeds the cost of deployment by orders of magnitude.
+\end{abstract}
+
+\section{Introduction: The Spectral Denial Problem}
+Standard emergency communication systems rely on two assumptions: reliable high-bandwidth backhaul (Cellular/Wi-Fi) and reliable positioning (GPS). In contested environments, both assumptions fail.
+
+\subsection{The Jamming Threat Model}
+\begin{enumerate}
+    \item \textbf{High-Frequency Denial:} 2.4GHz and 5GHz bands (Wi-Fi) are easily attenuated by walls and effectively jammed by low-cost wide-band interrupters.
+    \item \textbf{GNSS Denial:} GPS signals are weak (-125 dBm) and susceptible to spoofing or jamming, rendering standard location-sharing apps useless.
+\end{enumerate}
+
+To address this, LifeLink shifts the physical layer to LoRa (Long Range) at 915 MHz. This lower frequency offers superior penetration through urban obstacles and is significantly harder to jam without high-power military-grade equipment. However, this shift reduces available bandwidth from Megabits/sec to roughly 300 bits/sec. This physical constraint necessitates our primary contribution: \textit{Semantic Compression}.
+
+\section{The Economics of Suppression}
+A key design goal of LifeLink is to leverage the asymmetry of cost between the \textit{suppressor} (the jammer) and the \textit{communicator} (the node). We utilize Commodity-Off-The-Shelf (COTS) hardware ($\approx$\$5/node at scale) to force the adversary into a Game Theoretic loss condition.
+
+We define the suppression game outcomes as follows:
+\begin{enumerate}
+    \item \textbf{Scenario A (Zero Deployment):} If the adversary deploys no jammers, LifeLink operates as a standard high-availability mesh.
+    \item \textbf{Scenario B (Partial Denial):} If the adversary deploys limited jamming, the mesh topology is able to dynamically route around interference holes. The low cost of nodes allows civilians to "swarm" the environment, ensuring that a signal path exists statistically.
+    \item \textbf{Scenario C (Total Saturation):} To fully suppress a city-scale LoRa mesh, the adversary must blanket the noise floor across the entire 900MHz spectrum. This incurs an astronomical power cost and, critically, denies the adversary use of the spectrum for their own communications.
+\end{enumerate}
+
+\section{Hardware Architecture}
+The physical node is designed for zero-maintenance operation. It functions entirely off-grid, harvesting solar energy to maintain a continuous listening state.
+
+\subsection{Electrical Schematic}
+
+The main purpose of our electrical system, which can be seen in the node wiring diagram below, is to mediate between the bursts of power provided by the solar panel through the use of a standard lipo cell.
+
+% FIXED: Added resizebox to scale image to column width
+\begin{figure}[H] 
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1cm and 1cm,
+    block/.style={rectangle, draw, rounded corners, minimum width=2cm, minimum height=1cm, align=center},
+    line/.style={-Latex, thick},
+    wireless/.style={-Latex, dashed, thick}
+]
+
+% Nodes
+\node[block, fill=yellow!10] (solar) {Solar Panel\\(5V)};
+\node[block, right=of solar, fill=gray!10] (controller) {Charge Controller\\(TP4056)};
+\node[block, below=of controller, fill=blue!10] (battery) {LiPo Battery\\(3.7V)};
+\node[block, right=of controller, fill=red!10] (esp) {ESP32-S3\\Microcontroller};
+\node[block, right=of esp] (antenna) {Antenna\\(915 MHz)};
+\node[block, below=of esp, fill=green!10] (other) {Remote Node\\(Mesh)};
+
+% Connections
+\draw[line] (solar) -- (controller);
+\draw[line] (controller.south) -- (battery.north);
+\draw[line] (battery.north) -- (controller.south);
+\draw[line] (controller) -- (esp);
+\draw[line] (esp) -- (antenna);
+\draw[wireless] (antenna.south) -- (other.north);
+
+\end{tikzpicture}%
+}
+\caption{\textbf{Node Wiring Diagram.} The Charge Controller isolates the LiPo from over-discharge while regulating Solar input. The ESP32 handles the Protocol Stack and drives the RF interface.}
+\label{fig:hardware}
+\end{figure}
+
+\section{Methodology: Semantic Compression}
+Since we cannot transmit full text over LoRa during high congestion, we implement an AI-driven compression layer.
+
+\subsection{Feature Engineering for Embedded Systems}
+We utilize a lightweight vectorizer suitable for the ESP32's constraints. An input string $S$ is mapped to a feature vector $V \in \mathbb{R}^{82}$ composed of three subspaces:
+\begin{equation}
+    V = [v_{struct} \parallel v_{intent} \parallel v_{ngram}]
+\end{equation}
+
+While $v_{struct}$ captures morphology (e.g., capitalization ratio, punctuation), the critical innovation is $v_{ngram}$. To avoid storing a large vocabulary on the microcontroller, we employ the \textbf{FNV-1a} hash function. Character 4-grams are hashed into 64 fixed bins:
+\begin{equation}
+    v_{ngram}[i] = \sum_{g \in \text{grams}} \mathbb{I}(\text{FNV1a}(g) \pmod{64} = i)
+\end{equation}
+This allows the model to learn semantic clusters (e.g., "help", "hlp", "plz") robustly without a dictionary.
+
+\subsection{Hierarchical Triage}
+Inference uses a cascaded Decision Tree ensemble. A binary "Gate" classifier first determines if the message is \textit{Vital}. If true, secondary classifiers predict \textit{Intent} (e.g., MEDIC, EVAC) and \textit{Urgency} ($U \in [0,3]$).
+
+This reduces a 100-byte SMS to a rigid schema:
+\begin{equation}
+    \text{Payload} = \texttt{INTENT} \mid U_3 \mid F_{flags} \mid N_{count} \mid L_{token}
+\end{equation}
+This payload is approximately 8 bytes, reducing Airtime Utilization by $>90\%$ for critical traffic.
+
+\section{Protocol: Hybrid Resilient Routing}
+LifeLink implements a custom OSI Layer 3 protocol that does not rely on static routing tables.
+
+\subsection{Epidemic Gossip}
+Topology discovery is achieved via "piggybacking." Every heartbeat packet carries a compressed list of the sender's known neighbors. When Node $A$ receives a heartbeat from Node $B$, it updates its internal cost matrix:
+\begin{equation}
+    Cost(A \to D) = \min(Cost_{curr}, Cost(B \to D) + 1)
+\end{equation}
+This propagates connectivity data exponentially ("Epidemic" spread) without flooding the network with control packets.
+
+\subsection{Geographic-Gradient Forwarding}
+Routing decisions for a packet at Node $N$ destined for $D$ follow a prioritized heuristic:
+\begin{enumerate}
+    \item \textbf{Direct Delivery:} If $D$ is a neighbor, transmit directly.
+    \item \textbf{Geographic Greedy:} If $N$ has high position confidence ($C > 0.3$), forward to the neighbor $n$ that minimizes the Haversine distance to $D$:
+    \begin{equation}
+        n^* = \operatorname*{argmin}_{n \in Neighbors} \text{Haversine}(Pos_n, Pos_D)
+    \end{equation}
+    \item \textbf{Gradient Fallback:} If Geographic forwarding encounters a local minima (no neighbor is closer), the protocol falls back to the "Hops Away" gradient learned via gossip.
+\end{enumerate}
+
+\section{Simulation: The Capture Effect}
+To validate resilience, we developed a discrete-event simulator modeling the \textbf{LoRa Capture Effect}. In a collision where packet $P_A$ and $P_B$ arrive simultaneously, $P_A$ is successfully decoded if:
+\begin{equation}
+    RSSI_A - RSSI_B > 6\text{dB}
+\end{equation}
+This confirms that even under heavy jamming (modeled as a high-noise floor), proximate nodes can still communicate effectively, preserving local mesh integrity.
+
+\section{Conclusion}
+LifeLink validates that civilian communication infrastructure can be hardened against state-level disruption. By combining the physics of LoRa propagation, the economics of cheap hardware, and the efficiency of semantic AI, we render the strategy of spectral jamming fiscally and tactically obsolete.
+
+\end{document}
