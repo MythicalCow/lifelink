@@ -132,6 +132,9 @@ export class MeshNode {
   /** Current radio state (reset each tick by simulator) */
   state: "idle" | "tx" | "rx" = "idle";
 
+  /** When true, only route through trusted peers */
+  private trustedOnlyRouting = false;
+
   /** Outbound queue — simulator pulls from this */
   txQueue: MeshPacket[] = [];
 
@@ -475,12 +478,21 @@ export class MeshNode {
 
   /** Geographic + Gradient routing to pick next hop */
   getNextHop(destId: number): number | null {
+    // Filter neighbors by trust if trusted-only routing is enabled
+    const candidateNeighbors = new Map<number, NeighborEntry>();
+    for (const [nid, entry] of this.neighborTable) {
+      if (this.trustedOnlyRouting && !this.storage.trustedPeers.has(nid)) {
+        continue; // Skip untrusted neighbors when trust-only mode is on
+      }
+      candidateNeighbors.set(nid, entry);
+    }
+
     // 1. Direct neighbor?
-    const direct = this.neighborTable.get(destId);
+    const direct = candidateNeighbors.get(destId);
     if (direct && direct.hopsAway === 1) return destId;
 
     // 2. Geographic greedy forwarding (using estimated positions)
-    const destEntry = this.neighborTable.get(destId);
+    const destEntry = candidateNeighbors.get(destId);
     if (destEntry && destEntry.posConfidence > 0.3) {
       const myDist = haversine(
         this.estLat,
@@ -491,7 +503,7 @@ export class MeshNode {
       let bestId: number | null = null;
       let bestDist = myDist; // must improve on our distance
 
-      for (const [nid, n] of this.neighborTable) {
+      for (const [nid, n] of candidateNeighbors) {
         if (n.hopsAway !== 1) continue; // direct neighbors only
         if (n.posConfidence < 0.3) continue; // need confident position
         const d = haversine(n.lat, n.lng, destEntry.lat, destEntry.lng);
@@ -504,13 +516,13 @@ export class MeshNode {
 
       // 3. Gradient fallback — learned-via neighbor
       if (destEntry.viaNode !== this.id) {
-        const via = this.neighborTable.get(destEntry.viaNode);
+        const via = candidateNeighbors.get(destEntry.viaNode);
         if (via && via.hopsAway === 1) return destEntry.viaNode;
       }
 
       // 4. Last resort — closest neighbor to dest even if no improvement
       bestDist = Infinity;
-      for (const [nid, n] of this.neighborTable) {
+      for (const [nid, n] of candidateNeighbors) {
         if (n.hopsAway !== 1) continue;
         const d = haversine(n.lat, n.lng, destEntry.lat, destEntry.lng);
         if (d < bestDist) {
@@ -523,7 +535,7 @@ export class MeshNode {
 
     // 5. No position info — fall back to gradient (via node)
     if (destEntry && destEntry.viaNode !== this.id) {
-      const via = this.neighborTable.get(destEntry.viaNode);
+      const via = candidateNeighbors.get(destEntry.viaNode);
       if (via && via.hopsAway === 1) return destEntry.viaNode;
     }
 
@@ -792,6 +804,14 @@ export class MeshNode {
   setBleEnabled(enabled: boolean): void {
     this.bleEnabled = enabled;
     this.notify(`BLE ${enabled ? "enabled" : "disabled"}`, "info");
+  }
+
+  /**
+   * Enable or disable trusted-only routing.
+   * When enabled, this node only routes through trusted peers.
+   */
+  setTrustedOnlyRouting(enabled: boolean): void {
+    this.trustedOnlyRouting = enabled;
   }
 
   /* ── Helpers ──────────────────────────────────────────── */

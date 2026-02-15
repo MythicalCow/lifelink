@@ -7,7 +7,6 @@ import { SimControls } from "@/components/sim-controls";
 import { Messenger, type ChatMessage } from "@/components/messenger";
 import { Sensors } from "@/components/sensors";
 import { NodeManager } from "@/components/node-manager";
-import { TrustGraphConfig } from "@/components/trust-graph-config";
 import { useSimulation, type SimulationHook } from "@/hooks/use-simulation";
 import type { SensorNode } from "@/types/sensor";
 import {
@@ -18,6 +17,12 @@ import {
 // Start with no nodes — user adds them via Sensors tab
 const INITIAL_NODES: SensorNode[] = [];
 
+type QuickSetupPending = {
+  maliciousNodes: Array<{ type: string; id: number }>;
+  regularNodeIds: number[];
+  density: number;
+};
+
 export default function SimulationPage() {
   const [view, setView] = useState<ViewMode>("nodes"); // Start on nodes tab
   const [nodes, setNodes] = useState<SensorNode[]>(INITIAL_NODES);
@@ -25,7 +30,9 @@ export default function SimulationPage() {
   const [showMessages, setShowMessages] = useState(false);
   const [messagesWide, setMessagesWide] = useState(false);
   const [showGodMode, setShowGodMode] = useState(false);
+  const [trustedOnlyRouting, setTrustedOnlyRouting] = useState(false);
   const [mapKey, setMapKey] = useState(0);
+  const [pendingQuickSetup, setPendingQuickSetup] = useState<QuickSetupPending | null>(null);
 
   const sim: SimulationHook = useSimulation(nodes);
 
@@ -131,36 +138,6 @@ export default function SimulationPage() {
     nextNodeId.current = Math.max(nextNodeId.current, node.id + 1);
   }, []);
 
-  const handleDeleteNode = useCallback((nodeId: number) => {
-    setNodes((prev) => prev.filter((n) => n.id !== nodeId));
-  }, []);
-
-  const handleToggleMalicious = useCallback((nodeId: number, isMalicious: boolean) => {
-    setNodes((prev) => prev.map((n) => {
-      if (n.id === nodeId) {
-        return {
-          ...n,
-          label: isMalicious 
-            ? `[MAL] ${n.label?.replace("[MAL] ", "") ?? `Node ${n.id}`}`
-            : n.label?.replace("[MAL] ", "") ?? `Node ${n.id}`,
-        };
-      }
-      return n;
-    }));
-  }, []);
-
-  const handleConfigureAttack = useCallback((nodeId: number, strategy: string, intensity: number) => {
-    if (!sim.state) return;
-    const simulator = sim.simRef.current;
-    if (simulator) {
-      const node = simulator.getNode(nodeId);
-      if (node && typeof node.setStrategy === "function") {
-        node.setStrategy(strategy);
-        node.setIntensity(intensity);
-      }
-    }
-  }, [sim]);
-
   const handleQuickSetup = useCallback((config: {
     nodeCount: number;
     maliciousCount: number;
@@ -215,47 +192,24 @@ export default function SimulationPage() {
     setNodes(newNodes);
     nextNodeId.current = currentId;
 
-    // Wait for simulation to update, then configure
-    setTimeout(() => {
-      const simulator = sim.simRef.current;
-      if (!simulator) return;
+    const regularNodeIds = newNodes
+      .filter((n) => !n.label?.includes("[MAL]"))
+      .map((n) => n.id);
 
-      // Configure malicious node strategies
-      for (const { type, id } of maliciousNodes) {
-        const node = simulator.getNode(id);
-        if (node && typeof node.setStrategy === "function") {
-          node.setStrategy(type);
-          node.setIntensity(0.5);
-        }
-      }
-
-      // Configure trust graph (exclude malicious nodes)
-      const regularNodeIds = newNodes
-        .filter((n) => !n.label?.includes("[MAL]"))
-        .map((n) => n.id);
-      
-      if (regularNodeIds.length > 0) {
-        simulator.configureTrustGraph(regularNodeIds, config.density);
-      }
-    }, 100);
+    setPendingQuickSetup({
+      maliciousNodes,
+      regularNodeIds,
+      density: config.density,
+    });
   }, [sim]);
 
   const handleClearAll = useCallback(() => {
     setNodes([]);
     nextNodeId.current = 1;
+    setPendingQuickSetup(null);
   }, []);
 
   /* ── Trust Graph Configuration ── */
-  const handleConfigureTrust = useCallback((nodeIds: number[], density: number) => {
-    if (!sim.state) return;
-    // Access simulator internals to configure trust
-    const simulator = sim.simRef.current;
-    if (simulator) {
-      simulator.configureTrustGraph(nodeIds, density);
-      sim.refreshState();
-    }
-  }, [sim]);
-
   const handleApplyTrustGraph = useCallback((trustMap: Record<number, number[]>) => {
     if (!sim.state) return;
     const simulator = sim.simRef.current;
@@ -264,6 +218,39 @@ export default function SimulationPage() {
       sim.refreshState();
     }
   }, [sim]);
+
+  // Update trusted-only routing setting when toggle changes
+  useEffect(() => {
+    const simulator = sim.simRef.current;
+    if (simulator) {
+      simulator.setTrustedOnlyRouting(trustedOnlyRouting);
+    }
+  }, [trustedOnlyRouting, sim.simRef]);
+
+  useEffect(() => {
+    if (!pendingQuickSetup || !sim.simRef.current || !sim.state) return;
+    if (sim.state.nodeStates.length !== nodes.length) return;
+
+    const simulator = sim.simRef.current;
+
+    for (const { type, id } of pendingQuickSetup.maliciousNodes) {
+      const node = simulator.getNode(id);
+      if (node && typeof node.setStrategy === "function") {
+        node.setStrategy(type);
+        node.setIntensity(0.5);
+      }
+    }
+
+    if (pendingQuickSetup.regularNodeIds.length > 0) {
+      simulator.configureTrustGraph(
+        pendingQuickSetup.regularNodeIds,
+        pendingQuickSetup.density,
+      );
+    }
+
+    sim.refreshState();
+    setPendingQuickSetup(null);
+  }, [nodes.length, pendingQuickSetup, sim, sim.state]);
 
   const trustMap = useMemo(() => {
     const map: Record<number, number[]> = {};
@@ -289,19 +276,11 @@ export default function SimulationPage() {
 
       {/* ── Map view ───────────────────────────────────── */}
       {view === "map" && (
-        <>
-          <SensorField
-            center={MAP_CENTER}
-            zoom={MAP_ZOOM}
-            simState={sim.state}
-            mapKey={mapKey}
-            showGodMode={showGodMode}
-          />
-
-          <div className="absolute top-16 right-4 z-[1000] grid w-[240px] grid-cols-2 gap-2">
+        <div className="absolute inset-0 top-16 flex flex-col">
+          <div className="flex flex-wrap items-center justify-end gap-2 border-b border-[var(--foreground)]/10 bg-[var(--surface)]/90 px-4 py-2 text-[10px] backdrop-blur">
             <button
               onClick={() => setShowMessages((prev) => !prev)}
-              className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
+              className={`rounded-lg px-3 py-1.5 font-medium shadow-sm transition-all ${
                 showMessages
                   ? "bg-sky-500/90 text-white"
                   : "bg-white/80 text-[var(--muted)] hover:bg-white"
@@ -312,7 +291,7 @@ export default function SimulationPage() {
             <button
               onClick={() => setMessagesWide((prev) => !prev)}
               disabled={!showMessages}
-              className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
+              className={`rounded-lg px-3 py-1.5 font-medium shadow-sm transition-all ${
                 showMessages
                   ? messagesWide
                     ? "bg-blue-500/90 text-white"
@@ -320,18 +299,17 @@ export default function SimulationPage() {
                   : "bg-white/40 text-[var(--muted)]/40 cursor-not-allowed"
               }`}
             >
-              {messagesWide ? "↔ Narrow" : "↔ Wide"}
+              {messagesWide ? "↔ Equal Split" : "↔ Focus Messages"}
             </button>
-
             <button
               onClick={() => setMapKey((prev) => prev + 1)}
-              className="rounded-lg bg-white/80 px-3 py-1.5 text-[10px] font-medium text-[var(--muted)] shadow-sm backdrop-blur-sm transition-colors hover:bg-white"
+              className="rounded-lg bg-white/80 px-3 py-1.5 font-medium text-[var(--muted)] shadow-sm transition-colors hover:bg-white"
             >
               🔄 Refresh Map
             </button>
             <button
               onClick={() => setShowGodMode((prev) => !prev)}
-              className={`rounded-lg px-3 py-1.5 text-[10px] font-medium shadow-sm backdrop-blur-sm transition-all ${
+              className={`rounded-lg px-3 py-1.5 font-medium shadow-sm transition-all ${
                 showGodMode
                   ? "bg-amber-500/90 text-white"
                   : "bg-white/80 text-[var(--muted)] hover:bg-white"
@@ -339,34 +317,57 @@ export default function SimulationPage() {
             >
               {showGodMode ? "👁 True Positions" : "📡 Estimated"}
             </button>
+            <button
+              onClick={() => setTrustedOnlyRouting((prev) => !prev)}
+              className={`rounded-lg px-3 py-1.5 font-medium shadow-sm transition-all ${
+                trustedOnlyRouting
+                  ? "bg-green-500/90 text-white"
+                  : "bg-white/80 text-[var(--muted)] hover:bg-white"
+              }`}
+              title="Route only through nodes with established trust relationships"
+            >
+              {trustedOnlyRouting ? "🔒 Trusted Routing ON" : "🔓 Trusted Routing OFF"}
+            </button>
           </div>
 
-          <div
-            className={`absolute right-0 top-32 bottom-16 z-[900] flex max-h-[calc(100%-12rem)] flex-col items-end gap-3 pr-4 transition-transform duration-300 ${
-              showMessages ? "translate-x-0" : "translate-x-full"
-            } ${
-              messagesWide
-                ? "w-[980px]"
-                : "w-[780px]"
-            }`}
-          >
+          <div className="flex min-h-0 flex-1">
+            <div
+              className={`relative min-h-0 ${
+                showMessages
+                  ? messagesWide
+                    ? "w-2/5"
+                    : "w-1/2"
+                  : "w-full"
+              }`}
+            >
+              <SensorField
+                center={MAP_CENTER}
+                zoom={MAP_ZOOM}
+                simState={sim.state}
+                mapKey={mapKey}
+                showGodMode={showGodMode}
+              />
+            </div>
+
             {showMessages && (
               <div
-                className={`mt-auto flex h-[54vh] min-h-[360px] max-h-[700px] flex-col overflow-hidden rounded-xl border border-[var(--foreground)]/10 bg-[var(--surface)] shadow-2xl ${
-                  messagesWide ? "w-[980px]" : "w-[780px]"
+                className={`min-h-0 overflow-hidden border-l border-[var(--foreground)]/10 bg-[var(--surface)] ${
+                  messagesWide ? "w-3/5" : "w-1/2"
                 }`}
               >
-                <Messenger
-                  nodes={nodes}
-                  simState={sim.state}
-                  messages={messages}
-                  setMessages={setMessages}
-                  msgCounterRef={msgCounterRef}
-                  onSendMessage={handleMessengerSend}
-                  onRefresh={handleRefreshMessages}
-                  variant="panel"
-                  allowAnyGateway
-                />
+                <div className="h-full">
+                  <Messenger
+                    nodes={nodes}
+                    simState={sim.state}
+                    messages={messages}
+                    setMessages={setMessages}
+                    msgCounterRef={msgCounterRef}
+                    onSendMessage={handleMessengerSend}
+                    onRefresh={handleRefreshMessages}
+                    variant="panel"
+                    allowAnyGateway
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -381,7 +382,7 @@ export default function SimulationPage() {
             onToggleSpeed={sim.toggleSpeed}
             onReset={sim.reset}
           />
-        </>
+        </div>
       )}
 
       {/* ── Sensors view (BLE node configuration) ─────── */}
@@ -389,25 +390,13 @@ export default function SimulationPage() {
         <Sensors onNodeConfigured={handleNodeConfigured} />
       )}
 
-      {/* ── Nodes view (Node Management) ────────────── */}
+      {/* ── Nodes view (Node Management & Trust) ────────────── */}
       {view === "nodes" && (
         <NodeManager
           nodes={nodes}
           onAddNode={handleAddNode}
-          onDeleteNode={handleDeleteNode}
-          onToggleMalicious={handleToggleMalicious}
-          onConfigureAttack={handleConfigureAttack}
           onQuickSetup={handleQuickSetup}
           onClearAll={handleClearAll}
-          simState={sim.state}
-        />
-      )}
-
-      {/* ── Trust view (Trust Graph Configuration) ──── */}
-      {view === "trust" && (
-        <TrustGraphConfig
-          nodes={nodes}
-          onConfigure={handleConfigureTrust}
           trustMap={trustMap}
           onApplyConnections={handleApplyTrustGraph}
         />
@@ -419,10 +408,8 @@ export default function SimulationPage() {
           {view === "map"
             ? "Mesh Simulation"
             : view === "nodes"
-                ? "Node Management — Add/Delete Nodes"
-                : view === "trust"
-                  ? "Trust Configuration — Public Key Exchange"
-                  : "Stanford Campus — Node Setup"}
+                ? "Node Management & Trust Configuration"
+                : "Stanford Campus — Node Setup"}
         </span>
       </footer>
     </main>

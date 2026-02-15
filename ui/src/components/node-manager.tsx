@@ -8,14 +8,10 @@
 import { useState } from "react";
 import type { SensorNode } from "@/types/sensor";
 import type { AttackStrategy } from "@/simulation/malicious-node";
-import type { SimState } from "@/simulation/types";
 
 interface NodeManagerProps {
   nodes: SensorNode[];
   onAddNode: (node: SensorNode) => void;
-  onDeleteNode: (nodeId: number) => void;
-  onToggleMalicious: (nodeId: number, isMalicious: boolean) => void;
-  onConfigureAttack?: (nodeId: number, strategy: AttackStrategy, intensity: number) => void;
   onQuickSetup?: (config: {
     nodeCount: number;
     maliciousCount: number;
@@ -23,27 +19,18 @@ interface NodeManagerProps {
     density: number;
   }) => void;
   onClearAll?: () => void;
-  simState?: SimState | null;
+  trustMap?: Record<number, number[]>;
+  onApplyConnections?: (trustMap: Record<number, number[]>) => void;
 }
 
 export function NodeManager({
   nodes,
   onAddNode,
-  onDeleteNode,
-  onToggleMalicious,
-  onConfigureAttack,
   onQuickSetup,
   onClearAll,
-  simState,
+  trustMap = {},
+  onApplyConnections,
 }: NodeManagerProps) {
-  // Debug: log simState updates
-  if (typeof console !== 'undefined' && simState) {
-    const totalMessages = simState.nodeStates.reduce((sum, ns) => sum + (ns.receivedMessages?.length || 0), 0);
-    if (totalMessages > 0) {
-      // simState updated, total messages across all nodes: ${totalMessages}
-    }
-  }
-  
   const [showAddForm, setShowAddForm] = useState(false);
   const [showQuickSetup, setShowQuickSetup] = useState(false);
   const [newNodeName, setNewNodeName] = useState("");
@@ -64,12 +51,76 @@ export function NodeManager({
   const [malBlackholes, setMalBlackholes] = useState(0);
   const [malSelective, setMalSelective] = useState(0);
 
-  // Track expanded malicious nodes for config
-  const [expandedNodeId, setExpandedNodeId] = useState<number | null>(null);
-  const [editStrategy, setEditStrategy] = useState<AttackStrategy>("jammer");
-  const [editIntensity, setEditIntensity] = useState(0.5);
+  // Trust graph state
+  const [draftConnections, setDraftConnections] = useState<
+    Record<number, Set<number>>
+  >({});
 
   const regularNodeCount = Math.max(quickNodeCount - quickMaliciousCount, 0);
+
+  // Trust graph calculations
+  const availableNodes = nodes.filter((n) => !n.label?.startsWith("[MAL]"));
+  const nodeLabelMap = new Map<number, string>();
+  for (const node of availableNodes) {
+    nodeLabelMap.set(node.id, node.label || `Node ${node.id}`);
+  }
+
+  const baseTrustMap: Record<number, number[]> = {};
+  for (const node of availableNodes) {
+    const peers = trustMap[node.id] ?? [];
+    baseTrustMap[node.id] = [...new Set(peers.filter((peerId) => peerId !== node.id))]
+      .sort((a, b) => a - b);
+  }
+
+  const pendingTrustMap: Record<number, number[]> = {};
+  for (const node of availableNodes) {
+    const draft = draftConnections[node.id];
+    const peers = draft ? [...draft] : [...(baseTrustMap[node.id] ?? [])];
+    pendingTrustMap[node.id] = peers.sort((a, b) => a - b);
+  }
+
+  const hasChanges =
+    JSON.stringify(pendingTrustMap) !== JSON.stringify(baseTrustMap);
+
+  const totalConnections = Object.values(baseTrustMap).reduce(
+    (sum, peers) => sum + peers.length,
+    0
+  ) / 2;
+  const maxPossibleConnections = (availableNodes.length * (availableNodes.length - 1)) / 2;
+  const density = maxPossibleConnections > 0 ? (totalConnections / maxPossibleConnections) * 100 : 0;
+
+  const handleToggleConnection = (
+    nodeId: number,
+    peerId: number,
+    isConnected: boolean,
+  ) => {
+    setDraftConnections((prev) => {
+      const next = { ...prev };
+      const baseNodePeers = baseTrustMap[nodeId] ?? [];
+      const basePeerPeers = baseTrustMap[peerId] ?? [];
+      const nodeSet = new Set(next[nodeId] ?? baseNodePeers);
+      const peerSet = new Set(next[peerId] ?? basePeerPeers);
+
+      if (isConnected) {
+        nodeSet.add(peerId);
+        peerSet.add(nodeId);
+      } else {
+        nodeSet.delete(peerId);
+        peerSet.delete(nodeId);
+      }
+
+      next[nodeId] = nodeSet;
+      next[peerId] = peerSet;
+      return next;
+    });
+  };
+
+  const handleApplyConnections = () => {
+    if (!onApplyConnections) return;
+    if (availableNodes.length < 2) return;
+    onApplyConnections(pendingTrustMap);
+    setDraftConnections({});
+  };
 
   const buildMaliciousTypes = (targetCount: number) => {
     if (targetCount <= 0) return [];
@@ -153,11 +204,16 @@ export function NodeManager({
   };
 
   return (
-    <div className="absolute inset-0 top-16 bottom-10 flex flex-col bg-[var(--surface)] text-[var(--foreground)] overflow-hidden">
+    <div className="absolute inset-0 top-16 bottom-0 flex flex-col bg-[var(--surface)] text-[var(--foreground)] overflow-hidden">
       {/* Header */}
       <div className="flex-none px-4 py-3 border-b border-[var(--foreground)]/10">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Node Management</h2>
+          <div>
+            <h2 className="text-lg font-semibold">Node & Trust Management</h2>
+            <p className="text-xs text-[var(--foreground)]/60 mt-0.5">
+              Configure nodes and trust relationships
+            </p>
+          </div>
           <div className="flex items-center gap-2">
             {nodes.length > 0 && onClearAll && (
               <button
@@ -425,187 +481,139 @@ export function NodeManager({
         </div>
       )}
 
-      {/* Node List */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="p-4 space-y-2">
-          {nodes.length === 0 ? (
-            <div className="text-center text-[var(--foreground)]/50 py-8">
-              No nodes yet. Click &quot;Add Node&quot; to create one.
-            </div>
-          ) : (
-            nodes.map((node) => {
-              const isMal = node.label?.startsWith("[MAL]") ?? false;
-              const isExpanded = expandedNodeId === node.id;
-              
-              // Get received messages for this node from simState
-              const nodeState = simState?.nodeStates.find(ns => ns.id === node.id);
-              const receivedMessages = nodeState?.receivedMessages ?? [];
-              
-              return (
-                <div key={node.id} className="space-y-2">
-                  <div
-                    className={`p-3 rounded border ${
-                      isMal
-                        ? "border-red-500/30 bg-red-500/5"
-                        : "border-[var(--foreground)]/10 bg-[var(--foreground)]/5"
-                    } hover:border-[var(--foreground)]/20 transition-colors`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className={`font-medium ${isMal ? "text-red-400" : ""}`}>
-                            {node.label || `Node ${node.id}`}
-                          </span>
-                          {node.isAnchor && (
-                            <span className="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 text-xs rounded">
-                              GPS
-                            </span>
-                          )}
-                          {isMal && (
-                            <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 text-xs rounded">
-                              MALICIOUS
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-[var(--foreground)]/50 mt-1">
-                          ID: {node.id} | Pos: ({node.lat.toFixed(4)}, {node.lng.toFixed(4)})
-                        </div>
-                      </div>
+      {/* Trust Graph & Node List */}
+      <div className="flex-1 overflow-y-auto pb-16">
+        {/* Trust Graph Section */}
+        {nodes.length > 0 && (
+          <div className="p-4 border-b border-[var(--foreground)]/10 bg-blue-500/5">
+            <div className="space-y-4">
+              {/* Trust Graph Overview */}
+              <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+                <h3 className="text-sm font-semibold mb-3 text-blue-600">&#128274; Trust Graph Overview</h3>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-[var(--foreground)]">{availableNodes.length}</div>
+                    <div className="text-xs text-[var(--foreground)]/60">Nodes</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-blue-600">{totalConnections}</div>
+                    <div className="text-xs text-[var(--foreground)]/60">Connections</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-green-600">{density.toFixed(0)}%</div>
+                    <div className="text-xs text-[var(--foreground)]/60">Density</div>
+                  </div>
+                </div>
+                
+                {totalConnections === 0 && availableNodes.length >= 2 && (
+                  <div className="mt-3 text-center text-xs text-amber-600 bg-amber-500/10 rounded-lg py-2 px-3">
+                    &#9888;&#65039; No trust connections. Use Quick Setup or configure below.
+                  </div>
+                )}
+                
+                {totalConnections > 0 && (
+                  <div className="mt-3 text-xs text-[var(--foreground)]/60 text-center">
+                    Trust connections shown as gray lines on the map.
+                  </div>
+                )}
+              </div>
 
-                      <div className="flex gap-2">
-                        {isMal && onConfigureAttack && (
-                          <button
-                            onClick={() => {
-                              if (isExpanded) {
-                                setExpandedNodeId(null);
-                              } else {
-                                setExpandedNodeId(node.id);
-                                setEditStrategy("jammer");
-                                setEditIntensity(0.5);
-                              }
-                            }}
-                            className="px-2 py-1 text-xs text-yellow-400 hover:bg-yellow-500/10 rounded transition-colors"
-                          >
-                            {isExpanded ? "Cancel" : "Configure"}
-                          </button>
-                        )}
-                        {onToggleMalicious && (
-                          <button
-                            onClick={() => onToggleMalicious(node.id, !isMal)}
-                            className={`px-2 py-1 text-xs rounded transition-colors ${
-                              isMal
-                                ? "text-green-400 hover:bg-green-500/10"
-                                : "text-red-400 hover:bg-red-500/10"
-                            }`}
-                          >
-                            {isMal ? "Make Normal" : "Make Malicious"}
-                          </button>
-                        )}
-                        <button
-                          onClick={() => onDeleteNode(node.id)}
-                          className="px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded transition-colors"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Received Messages Display - Always show for debugging */}
-                    <div className="mt-3 pt-3 border-t border-[var(--foreground)]/10">
-                      <div className="text-xs font-medium text-[var(--foreground)]/70 mb-2">
-                        📬 Received Messages ({receivedMessages.length})
-                      </div>
-                      {receivedMessages.length > 0 ? (
-                        <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                          {receivedMessages.slice(-5).reverse().map((msg, idx) => {
-                            const fromNode = nodes.find(n => n.id === msg.fromNodeId);
-                            const fromLabel = fromNode?.label ?? `Node ${msg.fromNodeId}`;
-                            return (
-                              <div
-                                key={`${msg.id}-${idx}`}
-                                className="p-2 bg-[var(--foreground)]/5 rounded text-xs"
-                              >
-                                <div className="flex items-center justify-between gap-2 mb-1">
-                                  <span className="font-medium text-blue-500">
-                                    From: {fromLabel}
-                                  </span>
-                                  <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)]/50">
-                                    <span>{msg.hopCount} hops</span>
-                                    <span>•</span>
-                                    <span>tick {msg.timestamp}</span>
-                                  </div>
-                                </div>
-                                <div className="text-[var(--foreground)]/60 break-all">
-                                  {msg.text || '(empty message)'}
-                                </div>
-                              </div>
-                            );
-                          })}
-                          {receivedMessages.length > 5 && (
-                            <div className="text-center text-[10px] text-[var(--muted)]/40 pt-1">
-                              +{receivedMessages.length - 5} more messages
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="text-[10px] text-[var(--muted)]/50 italic py-2">
-                          No messages received yet. Node state: {nodeState ? 'found' : 'NOT FOUND'}
-                        </div>
-                      )}
-                    </div>
+              {/* Manual Connections */}
+              {availableNodes.length >= 2 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium">Manual Trust Connections</label>
+                    <span className="text-xs text-[var(--foreground)]/60">
+                      Bidirectional
+                    </span>
                   </div>
 
-                  {/* Attack Configuration Panel */}
-                  {isExpanded && isMal && onConfigureAttack && (
-                    <div className="ml-4 p-3 bg-yellow-500/5 border border-yellow-500/20 rounded text-sm">
-                      <div className="space-y-3">
-                        <div>
-                          <label className="block text-xs font-medium mb-1">Attack Strategy</label>
-                          <select
-                            value={editStrategy}
-                            onChange={(e) => setEditStrategy(e.target.value as AttackStrategy)}
-                            className="w-full px-2 py-1 bg-[var(--surface)] border border-[var(--foreground)]/20 rounded text-sm"
-                          >
-                            <option value="jammer">Jammer (Flood channel)</option>
-                            <option value="liar">Liar (False positions)</option>
-                            <option value="sybil">Sybil (Fake identities)</option>
-                            <option value="blackhole">Blackhole (Drop all)</option>
-                            <option value="selective">Selective (Target specific)</option>
-                          </select>
-                        </div>
+                  <div className="space-y-2">
+                    {availableNodes.map((node) => {
+                      const connectedPeers = pendingTrustMap[node.id] ?? [];
+                      const connectedLabels = connectedPeers
+                        .map((peerId) => nodeLabelMap.get(peerId) ?? `Node ${peerId}`)
+                        .join(", ");
 
-                        <div>
-                          <label className="block text-xs font-medium mb-1">
-                            Intensity: {(editIntensity * 100).toFixed(0)}%
-                          </label>
-                          <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.1"
-                            value={editIntensity}
-                            onChange={(e) => setEditIntensity(parseFloat(e.target.value))}
-                            className="w-full"
-                          />
-                        </div>
-
-                        <button
-                          onClick={() => {
-                            onConfigureAttack(node.id, editStrategy, editIntensity);
-                            setExpandedNodeId(null);
-                          }}
-                          className="w-full py-1.5 bg-yellow-600 hover:bg-yellow-700 text-white text-xs rounded transition-colors"
+                      return (
+                        <div
+                          key={node.id}
+                          className="rounded border border-[var(--foreground)]/10 bg-[var(--foreground)]/5"
                         >
-                          Apply Configuration
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                          <div className="flex items-center justify-between px-3 py-2">
+                            <div>
+                              <div className="text-sm font-medium">
+                                {node.label || `Node ${node.id}`}
+                              </div>
+                              <div className="text-xs text-[var(--foreground)]/50">
+                                ID: {node.id}{node.isAnchor ? " • GPS Anchor" : ""}
+                              </div>
+                            </div>
+                            <span className="text-xs text-[var(--foreground)]/60">
+                              {connectedPeers.length} connections
+                            </span>
+                          </div>
+
+                          <details className="border-t border-[var(--foreground)]/10 px-3 py-2">
+                            <summary className="cursor-pointer text-xs text-[var(--foreground)]/70">
+                              {connectedPeers.length > 0
+                                ? `Connected to: ${connectedLabels}`
+                                : "No connections yet"}
+                            </summary>
+                            <div className="mt-2 grid grid-cols-2 gap-2">
+                              {availableNodes
+                                .filter((peer) => peer.id !== node.id)
+                                .map((peer) => {
+                                  const isChecked = connectedPeers.includes(peer.id);
+                                  return (
+                                    <label
+                                      key={peer.id}
+                                      className="flex items-center gap-2 text-xs text-[var(--foreground)]/80"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={(e) =>
+                                          handleToggleConnection(
+                                            node.id,
+                                            peer.id,
+                                            e.target.checked,
+                                          )
+                                        }
+                                        className="h-3.5 w-3.5"
+                                      />
+                                      <span>
+                                        {peer.label || `Node ${peer.id}`}
+                                      </span>
+                                    </label>
+                                  );
+                                })}
+                            </div>
+                          </details>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    onClick={handleApplyConnections}
+                    disabled={!onApplyConnections || availableNodes.length < 2 || !hasChanges}
+                    className={`w-full py-2.5 rounded font-medium transition-colors ${
+                      !onApplyConnections || availableNodes.length < 2 || !hasChanges
+                        ? "bg-[var(--foreground)]/10 text-[var(--foreground)]/30 cursor-not-allowed"
+                        : "bg-blue-600 hover:bg-blue-700 text-white"
+                    }`}
+                  >
+                    {hasChanges
+                      ? "Apply Manual Connections"
+                      : "Connections Up To Date"}
+                  </button>
                 </div>
-              );
-            })
-          )}
-        </div>
+              )}
+            </div>
+          </div>
+        )}
+
       </div>
 
       {/* Stats Footer */}

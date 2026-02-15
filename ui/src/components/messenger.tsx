@@ -5,6 +5,7 @@ import {
   useRef,
   useEffect,
   useMemo,
+  useCallback,
   type Dispatch,
   type SetStateAction,
   type MutableRefObject,
@@ -183,8 +184,45 @@ export function Messenger({
     for (const op of QUICK_OPS) initial[op.id] = true;
     return initial;
   });
+  const [viewMode, setViewMode] = useState<"log" | "all-logs" | "send-receive">("log");
+  const [expandedMessageIds, setExpandedMessageIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const threadRef = useRef<HTMLDivElement>(null);
+  const sendRef = useRef<HTMLDivElement>(null);
+  const receiveRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const textEncoder = useMemo(() => new TextEncoder(), []);
+
+  const toggleExpandedMessage = useCallback((id: string) => {
+    setExpandedMessageIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const getPayloadBytes = useCallback(
+    (text: string) => {
+      const parts = text.split(":");
+      const tail = parts[parts.length - 1]?.trim() ?? "";
+
+      if (/^[0-9a-f]+$/i.test(tail) && tail.length >= 2 && tail.length % 2 === 0) {
+        const bytes = new Uint8Array(tail.length / 2);
+        for (let i = 0; i < tail.length; i += 2) {
+          bytes[i / 2] = parseInt(tail.slice(i, i + 2), 16);
+        }
+        return bytes;
+      }
+
+      return textEncoder.encode(text);
+    },
+    [textEncoder],
+  );
 
   // Sort nodes by distance from user
   const sortedNodes = useMemo(
@@ -248,6 +286,16 @@ export function Messenger({
     }
   }, [messages, selectedDest]);
 
+  // Auto-scroll send/receive containers to top
+  useEffect(() => {
+    if (sendRef.current) {
+      sendRef.current.scrollTop = 0;
+    }
+    if (receiveRef.current) {
+      receiveRef.current.scrollTop = 0;
+    }
+  }, [messages]);
+
   // Enrich with transient statuses
   const enrichedMessages = messages.map((msg) => ({
     ...msg,
@@ -304,6 +352,28 @@ export function Messenger({
     setDraft("");
     inputRef.current?.focus();
   };
+
+  const handleRetryMessage = useCallback((failedMsg: ChatMessage) => {
+    if (!simState || !gatewayNode) return;
+
+    const currentTick = simState.tick;
+    const sentAt = currentTick % 86400;
+    const id = `msg-${++msgCounterRef.current}`;
+    const newMsg: ChatMessage = {
+      id,
+      fromNodeId: failedMsg.fromNodeId,
+      toNodeId: failedMsg.toNodeId,
+      text: failedMsg.text,
+      timestamp: currentTick,
+      direction: "sent",
+      status: "sending",
+      ttl: quickTTL,
+      sentAt,
+    };
+
+    setMessages((prev) => [...prev, newMsg]);
+    onSendMessage(failedMsg.fromNodeId, failedMsg.toNodeId, failedMsg.text, id);
+  }, [simState, gatewayNode, msgCounterRef, quickTTL, onSendMessage, setMessages]);
 
   useEffect(() => {
     if (!simState || scheduledMessages.length === 0) return;
@@ -482,17 +552,7 @@ export function Messenger({
           : "absolute inset-0 top-16 bottom-10 z-[500]"
       }`}
     >
-      {/* ── Refresh button ──────────────────────────────── */}
-      {onRefresh && messages.length > 0 && (
-        <div className="absolute top-2 right-4 z-[1000]">
-          <button
-            onClick={onRefresh}
-            className="rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-[10px] font-medium text-[var(--accent)] shadow-sm backdrop-blur-sm transition-colors hover:bg-[var(--accent)]/20"
-          >
-            🔄 Clear Messages
-          </button>
-        </div>
-      )}
+
 
       <div className={isPanel ? "flex min-h-0 flex-1 gap-5 px-4 pb-4 pt-2" : "flex flex-col"}>
         <div className={isPanel ? "flex w-[320px] shrink-0 flex-col gap-4 overflow-y-auto" : ""}>
@@ -850,12 +910,15 @@ export function Messenger({
                       const sender = nodes.find(n => n.id === msg.fromNodeId);
                       const receiver = nodes.find(n => n.id === msg.toNodeId);
                       const ticksInFlight = (simState?.tick ?? 0) - msg.timestamp;
-                      const messageBytes = Math.ceil(msg.text.length / 2);
+                      const payloadBytes = getPayloadBytes(msg.text);
+                      const messageBytes = payloadBytes.length;
                       const estimatedTotalTicks = Math.max(3, Math.ceil(messageBytes / 8));
                       const progress = Math.min(100, (ticksInFlight / estimatedTotalTicks) * 100);
                       const bytesSent = Math.min(messageBytes, Math.floor((ticksInFlight / estimatedTotalTicks) * messageBytes));
+                      const bitsSent = Math.min(messageBytes * 8, Math.floor((ticksInFlight / estimatedTotalTicks) * messageBytes * 8));
                       const ttlRemaining = msg.ttl ? msg.ttl - ticksInFlight : null;
                       const isNearExpiry = ttlRemaining !== null && ttlRemaining <= 2;
+                      const isExpanded = expandedMessageIds.has(msg.id);
                       
                       return (
                         <div
@@ -899,7 +962,23 @@ export function Messenger({
                                 <span className="shrink-0 text-[8px] tabular-nums text-[var(--muted)]/50">
                                   {bytesSent}/{messageBytes}B
                                 </span>
+                                <button
+                                  onClick={() => toggleExpandedMessage(msg.id)}
+                                  className="shrink-0 rounded-full border border-[var(--foreground)]/10 px-2 py-0.5 text-[8px] text-[var(--muted)]/70 transition-colors hover:text-[var(--foreground)]"
+                                  type="button"
+                                >
+                                  {isExpanded ? "Hide bits" : "Show bits"}
+                                </button>
                               </div>
+                              {isExpanded && (
+                                <MessageBitDetails
+                                  payloadBytes={payloadBytes}
+                                  bitsSent={bitsSent}
+                                  status={msg.status}
+                                  ttlRemaining={ttlRemaining}
+                                  isNearExpiry={isNearExpiry}
+                                />
+                              )}
                             </div>
                           </div>
                         </div>
@@ -921,7 +1000,12 @@ export function Messenger({
                     .map((msg) => {
                       const sender = nodes.find(n => n.id === msg.fromNodeId);
                       const receiver = nodes.find(n => n.id === msg.toNodeId);
-                      const messageBytes = Math.ceil(msg.text.length / 2);
+                      const payloadBytes = getPayloadBytes(msg.text);
+                      const messageBytes = payloadBytes.length;
+                      const ticksInFlight = (simState?.tick ?? 0) - msg.timestamp;
+                      const estimatedTotalTicks = Math.max(3, Math.ceil(messageBytes / 8));
+                      const bitsSent = Math.min(messageBytes * 8, Math.floor((ticksInFlight / estimatedTotalTicks) * messageBytes * 8));
+                      const isExpanded = expandedMessageIds.has(msg.id);
                       
                       return (
                         <div
@@ -938,10 +1022,36 @@ export function Messenger({
                                 {msg.ttl && <span className="text-[8px]">TTL:{msg.ttl}</span>}
                               </div>
                             </div>
-                            <span className="shrink-0 text-[8px] tabular-nums text-red-500/40">
-                              {messageBytes}B
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="shrink-0 text-[8px] tabular-nums text-red-500/40">
+                                {messageBytes}B
+                              </span>
+                              <button
+                                onClick={() => handleRetryMessage(msg)}
+                                className="shrink-0 rounded-full border border-red-500/20 px-2 py-0.5 text-[8px] text-red-500/60 transition-colors hover:text-red-500 hover:bg-red-500/10"
+                                type="button"
+                                title="Retry sending this message"
+                              >
+                                Retry
+                              </button>
+                              <button
+                                onClick={() => toggleExpandedMessage(msg.id)}
+                                className="shrink-0 rounded-full border border-red-500/20 px-2 py-0.5 text-[8px] text-red-500/60 transition-colors hover:text-red-500"
+                                type="button"
+                              >
+                                {isExpanded ? "Hide bits" : "Show bits"}
+                              </button>
+                            </div>
                           </div>
+                          {isExpanded && (
+                            <MessageBitDetails
+                              payloadBytes={payloadBytes}
+                              bitsSent={bitsSent}
+                              status={msg.status}
+                              ttlRemaining={msg.ttl ?? null}
+                              isNearExpiry={false}
+                            />
+                          )}
                         </div>
                       );
                     })}
@@ -966,7 +1076,10 @@ export function Messenger({
                     .map((msg) => {
                       const sender = nodes.find(n => n.id === msg.fromNodeId);
                       const receiver = nodes.find(n => n.id === msg.toNodeId);
-                      const messageBytes = Math.ceil(msg.text.length / 2);
+                      const payloadBytes = getPayloadBytes(msg.text);
+                      const messageBytes = payloadBytes.length;
+                      const bitsSent = messageBytes * 8;
+                      const isExpanded = expandedMessageIds.has(msg.id);
                       
                       return (
                         <div
@@ -982,10 +1095,28 @@ export function Messenger({
                                 <span className="text-[8px]">✓</span>
                               </div>
                             </div>
-                            <span className="shrink-0 text-[8px] tabular-nums text-[var(--muted)]/40">
-                              {messageBytes}B
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="shrink-0 text-[8px] tabular-nums text-[var(--muted)]/40">
+                                {messageBytes}B
+                              </span>
+                              <button
+                                onClick={() => toggleExpandedMessage(msg.id)}
+                                className="shrink-0 rounded-full border border-[var(--foreground)]/10 px-2 py-0.5 text-[8px] text-[var(--muted)]/70 transition-colors hover:text-[var(--foreground)]"
+                                type="button"
+                              >
+                                {isExpanded ? "Hide bits" : "Show bits"}
+                              </button>
+                            </div>
                           </div>
+                          {isExpanded && (
+                            <MessageBitDetails
+                              payloadBytes={payloadBytes}
+                              bitsSent={bitsSent}
+                              status={msg.status}
+                              ttlRemaining={null}
+                              isNearExpiry={false}
+                            />
+                          )}
                         </div>
                       );
                     })}
@@ -1011,228 +1142,314 @@ export function Messenger({
         </div>
 
         <div className={isPanel ? "flex min-w-0 flex-1 flex-col" : ""}>
-          {/* ── Destination selector (LoRa mesh) ───────────── */}
-          <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
-        <div className="flex items-center gap-2 pb-1.5">
-          <span className="text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase">
-            📡 Send to
-          </span>
-          <span className="text-[10px] text-[var(--muted)]/50">LoRa mesh</span>
-          <span className="text-[10px] text-[var(--muted)]/40">
-            · {discoveredCount} discovered
-          </span>
-        </div>
-
-        <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
-          {/* Log chip */}
-          <button
-            onClick={() => setSelectedDest("all")}
-            className={`flex shrink-0 items-center gap-2 rounded-xl px-4 py-2.5 transition-all duration-150 ${
-              selectedDest === "all"
-                ? "bg-[var(--foreground)]/[0.08] ring-1.5 ring-[var(--foreground)]/20"
-                : "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
-            }`}
-          >
-            <span
-              className={`text-[11px] font-medium leading-tight ${
-                selectedDest === "all"
-                  ? "text-[var(--foreground)]"
-                  : "text-[var(--muted)]"
-              }`}
-            >
-              Log
-            </span>
-            {messages.length > 0 && (
-              <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--foreground)]/10 px-1 text-[9px] font-semibold tabular-nums text-[var(--muted)]">
-                {messages.length}
-              </span>
-            )}
-          </button>
-
-          {/* Destination chips — labels come from gossip discovery */}
-          {destinations.map((node) => {
-            const isSelected = selectedDest === node.id;
-            const displayLabel = node.discoveredLabel ?? `Node ${node.id}`;
-            const threadCount = messages.filter(
-              (m) =>
-                (m.toNodeId === node.id &&
-                    m.fromNodeId === activeGatewayId) ||
-                  (m.fromNodeId === node.id &&
-                    m.toNodeId === activeGatewayId),
-            ).length;
-            return (
-              <button
-                key={node.id}
-                onClick={() => setSelectedDest(node.id)}
-                className={`flex shrink-0 flex-col items-start gap-1 rounded-xl px-4 py-2.5 transition-all duration-150 ${
-                  isSelected
-                    ? "bg-[var(--accent)]/10 ring-1.5 ring-[var(--accent)]"
-                    : node.isDiscovered
-                      ? "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
-                      : "bg-[var(--foreground)]/[0.02] opacity-50 hover:opacity-70"
-                }`}
-              >
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`text-[11px] font-medium leading-tight ${
-                      isSelected
-                        ? "text-[var(--accent)]"
-                        : node.isDiscovered
-                          ? "text-[var(--foreground)]"
-                          : "text-[var(--muted)]"
-                    }`}
+          {/* ── View mode toggle + Clear Messages ───────────── */}
+          <div className={isPanel ? "w-full px-2 pt-2" : "mx-auto w-full max-w-lg px-4 pt-2"}>
+            <div className="flex items-center justify-between gap-2 pb-2">
+              <div className="flex items-center gap-2">
+                {onRefresh && messages.length > 0 && (
+                  <button
+                    onClick={onRefresh}
+                    className="rounded-lg bg-[var(--accent)]/10 px-2.5 py-1 text-[10px] font-medium text-[var(--accent)] shadow-sm backdrop-blur-sm transition-colors hover:bg-[var(--accent)]/20"
                   >
-                    {displayLabel}
-                  </span>
-                  {!node.isDiscovered && (
-                    <span className="text-[9px] text-[var(--muted)]/40">?</span>
-                  )}
-                  {threadCount > 0 && (
-                    <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--accent)]/20 px-0.5 text-[8px] font-bold tabular-nums text-[var(--accent)]">
-                      {threadCount}
-                    </span>
-                  )}
+                    🔄 Clear All
+                  </button>
+                )}
+              </div>
+              <span className="text-[10px] font-semibold tracking-wide text-[var(--muted)] uppercase">
+                View Mode
+              </span>
+              <div className="flex items-center gap-2 rounded-full bg-[var(--foreground)]/[0.06] p-0.5">
+                <button
+                  onClick={() => setViewMode("log")}
+                  className={`rounded-full px-3 py-1 text-[10px] font-medium transition-colors ${
+                    viewMode === "log"
+                      ? "bg-white text-[var(--foreground)]"
+                      : "text-[var(--muted)]"
+                  }`}
+                >
+                  Log
+                </button>
+                <button
+                  onClick={() => setViewMode("all-logs")}
+                  className={`rounded-full px-3 py-1 text-[10px] font-medium transition-colors ${
+                    viewMode === "all-logs"
+                      ? "bg-white text-[var(--foreground)]"
+                      : "text-[var(--muted)]"
+                  }`}
+                >
+                  All Logs
+                </button>
+                <button
+                  onClick={() => setViewMode("send-receive")}
+                  className={`rounded-full px-3 py-1 text-[10px] font-medium transition-colors ${
+                    viewMode === "send-receive"
+                      ? "bg-white text-[var(--foreground)]"
+                      : "text-[var(--muted)]"
+                  }`}
+                >
+                  Send/Receive
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Destination selector (LoRa mesh) ───────────── */}
+          {viewMode !== "all-logs" && (
+            <div className={isPanel ? "w-full" : "mx-auto w-full max-w-lg px-4"}>
+              <div className="flex items-center gap-2 pb-1.5">
+                <span className="text-[10px] font-semibold tracking-wide text-[var(--accent)]/80 uppercase">
+                  📡 Send to
                 </span>
-                <span className="flex items-center gap-2">
-                  {node.isDiscovered ? (
-                    <span className="text-[10px] text-[var(--muted)]/60">
-                      via gossip
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-[var(--muted)]/40">
-                      undiscovered
-                    </span>
-                  )}
-                  <LoraIndicator discovered={node.isDiscovered} />
+                <span className="text-[10px] text-[var(--muted)]/50">LoRa mesh</span>
+                <span className="text-[10px] text-[var(--muted)]/40">
+                  · {discoveredCount} discovered
                 </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+              </div>
+
+              <div className="flex gap-2 overflow-x-auto pb-3 scrollbar-none">
+                {/* Destination chips — labels come from gossip discovery */}
+                {destinations.map((node) => {
+                  const isSelected = selectedDest === node.id;
+                  const displayLabel = node.discoveredLabel ?? `Node ${node.id}`;
+                  const threadCount = messages.filter(
+                    (m) =>
+                      (m.toNodeId === node.id &&
+                          m.fromNodeId === activeGatewayId) ||
+                        (m.fromNodeId === node.id &&
+                          m.toNodeId === activeGatewayId),
+                  ).length;
+                  return (
+                    <button
+                      key={node.id}
+                      onClick={() => setSelectedDest(node.id)}
+                      className={`flex shrink-0 flex-col items-start gap-1 rounded-xl px-4 py-2.5 transition-all duration-150 ${
+                        isSelected
+                          ? "bg-[var(--accent)]/10 ring-1.5 ring-[var(--accent)]"
+                          : node.isDiscovered
+                            ? "bg-[var(--foreground)]/[0.03] hover:bg-[var(--foreground)]/[0.06]"
+                            : "bg-[var(--foreground)]/[0.02] opacity-50 hover:opacity-70"
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span
+                          className={`text-[11px] font-medium leading-tight ${
+                            isSelected
+                              ? "text-[var(--accent)]"
+                              : node.isDiscovered
+                                ? "text-[var(--foreground)]"
+                                : "text-[var(--muted)]"
+                          }`}
+                        >
+                          {displayLabel}
+                        </span>
+                        {!node.isDiscovered && (
+                          <span className="text-[9px] text-[var(--muted)]/40">?</span>
+                        )}
+                        {threadCount > 0 && (
+                          <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--accent)]/20 px-0.5 text-[8px] font-bold tabular-nums text-[var(--accent)]">
+                            {threadCount}
+                          </span>
+                        )}
+                      </span>
+                      <span className="flex items-center gap-2">
+                        {node.isDiscovered ? (
+                          <span className="text-[10px] text-[var(--muted)]/60">
+                            via gossip
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-[var(--muted)]/40">
+                            undiscovered
+                          </span>
+                        )}
+                        <LoraIndicator discovered={node.isDiscovered} />
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
       {/* ── Divider ────────────────────────────────────── */}
-      <div className={isPanel ? "w-full px-1" : "mx-auto w-full max-w-lg px-6"}>
-        <div className="h-px bg-[var(--foreground)]/[0.06]" />
-      </div>
+      {viewMode !== "all-logs" && (
+        <div className={isPanel ? "w-full px-1" : "mx-auto w-full max-w-lg px-6"}>
+          <div className="h-px bg-[var(--foreground)]/[0.06]" />
+        </div>
+      )}
 
       {/* ── Thread / log area ──────────────────────────── */}
       <div
         ref={threadRef}
-        className={`flex w-full flex-1 flex-col gap-2 overflow-y-auto scrollbar-none ${
+        className={`flex w-full flex-col gap-2 overflow-y-auto scrollbar-none ${
           isPanel
-            ? "min-h-0 px-2 py-4"
-            : "mx-auto max-w-lg px-6 py-4"
+            ? "min-h-0 flex-1 px-2 py-4"
+            : "mx-auto max-w-lg flex-1 px-6 py-4"
         }`}
       >
-        {selectedDest === null ? (
-          <EmptyState
-            icon="📡"
-            title="Select a destination"
-            description="Pick a gateway above (BLE), then choose where to send via the LoRa mesh. Node names appear as gossip heartbeats propagate."
-          />
-        ) : selectedDest === "all" ? (
-          threadMessages.length === 0 ? (
-            <EmptyState
-              icon="📋"
-              title="No messages yet"
-              description="Send a message to any node and it will appear in the log."
-            />
-          ) : (
-            threadMessages.map((msg) => (
-              <LogEntry
-                key={msg.id}
-                message={msg}
-                resolveLabel={resolveLabel}
+        {viewMode === "all-logs" ? (
+          // ALL LOGS MODE: Show every message from everywhere
+          <>
+            {enrichedMessages.length === 0 ? (
+              <EmptyState
+                icon="📋"
+                title="No messages yet"
+                description="Send a message and it will appear here."
               />
-            ))
-          )
+            ) : (
+              enrichedMessages.map((msg) => (
+                <LogEntry
+                  key={msg.id}
+                  message={msg}
+                  resolveLabel={resolveLabel}
+                />
+              ))
+            )}
+          </>
+        ) : viewMode === "log" ? (
+          // LOG MODE: Show all messages or thread
+          <>
+            {selectedDest === null ? (
+              <EmptyState
+                icon="📡"
+                title="Select a destination"
+                description="Pick a gateway above (BLE), then choose where to send via the LoRa mesh. Node names appear as gossip heartbeats propagate."
+              />
+            ) : selectedDest === "all" ? (
+              threadMessages.length === 0 ? (
+                <EmptyState
+                  icon="📋"
+                  title="No messages yet"
+                  description="Send a message to any node and it will appear in the log."
+                />
+              ) : (
+                threadMessages.map((msg) => (
+                  <LogEntry
+                    key={msg.id}
+                    message={msg}
+                    resolveLabel={resolveLabel}
+                  />
+                ))
+              )
+            ) : (
+              // Single destination thread in log mode
+              threadMessages.length === 0 ? (
+                <EmptyState
+                  icon="💬"
+                  title="No messages in thread"
+                  description={`No messages yet with ${selectedNodeLabel}.`}
+                />
+              ) : (
+                threadMessages.map((msg) => (
+                  <LogEntry
+                    key={msg.id}
+                    message={msg}
+                    resolveLabel={resolveLabel}
+                  />
+                ))
+              )
+            )}
+          </>
         ) : (
-          <div className="grid gap-4 md:grid-cols-2">
-            <section className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-4">
-              <div className="flex items-center justify-between gap-2 pb-3 border-b border-blue-500/20">
-                <h3 className="text-sm font-semibold text-[var(--foreground)]">
-                  Send
-                </h3>
-                <span className="text-xs text-[var(--foreground)]/60">
-                  {sentMessages.length} total
-                </span>
-              </div>
-              {sentMessages.length === 0 ? (
-                <div className="py-6 text-center text-xs text-[var(--foreground)]/60">
-                  No outgoing messages yet
-                </div>
-              ) : (
-                <div className="mt-3 space-y-2">
-                  {sentMessages.map((msg) => {
-                    const status = getStatusDisplay(msg.status);
-                    return (
-                      <div
-                        key={msg.id}
-                        className="rounded-md border border-blue-500/20 bg-[var(--surface)]/60 p-3"
-                      >
-                        <div className="flex items-center justify-between gap-2 text-xs text-[var(--foreground)]/60">
-                          <span className={`font-semibold ${status.color}`}>
-                            {status.text}
-                          </span>
-                          <span>Tick {msg.timestamp}</span>
-                        </div>
-                        <div className="mt-2 text-sm font-mono text-[var(--foreground)] break-words">
-                          {msg.text || "(empty)"}
-                        </div>
-                        <div className="mt-2 text-xs text-[var(--foreground)]/60">
-                          To: {resolveLabel(msg.toNodeId)} | Hops: {msg.hops ?? 0}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-
-            <section className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
-              <div className="flex items-center justify-between gap-2 pb-3 border-b border-green-500/20">
-                <h3 className="text-sm font-semibold text-[var(--foreground)]">
-                  Receive
-                </h3>
-                <span className="text-xs text-[var(--foreground)]/60">
-                  {receivedMessages.length} total
-                </span>
-              </div>
-              {receivedMessages.length === 0 ? (
-                <div className="py-6 text-center text-xs text-[var(--foreground)]/60">
-                  No incoming messages yet
-                </div>
-              ) : (
-                <div className="mt-3 space-y-2">
-                  {receivedMessages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className="rounded-md border border-green-500/20 bg-[var(--surface)]/60 p-3"
-                    >
-                      <div className="flex items-center justify-between gap-2 text-xs text-[var(--foreground)]/60">
-                        <span className="font-semibold text-green-500">
-                          RECEIVED
-                        </span>
-                        <span>Tick {msg.timestamp}</span>
-                      </div>
-                      <div className="mt-2 text-sm font-mono text-[var(--foreground)] break-words">
-                        {msg.text || "(empty)"}
-                      </div>
-                      <div className="mt-2 text-xs text-[var(--foreground)]/60">
-                        From: {resolveLabel(msg.fromNodeId)} | Hops: {msg.hops ?? 0}
-                      </div>
+          // SEND-RECEIVE MODE: Show send/receive columns only
+          <>
+            {selectedDest === null || selectedDest === "all" ? (
+              <EmptyState
+                icon="📡"
+                title="Select a destination"
+                description="Pick a gateway above (BLE), then choose a specific node to see send/receive details."
+              />
+            ) : (
+              <div className="sticky top-0 mb-4 bg-inherit pb-2">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <section className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-4">
+                    <div className="flex items-center justify-between gap-2 pb-3 border-b border-blue-500/20">
+                      <h3 className="text-sm font-semibold text-[var(--foreground)]">
+                        Send
+                      </h3>
+                      <span className="text-xs text-[var(--foreground)]/60">
+                        {sentMessages.length} total
+                      </span>
                     </div>
-                  ))}
+                    {sentMessages.length === 0 ? (
+                      <div className="py-6 text-center text-xs text-[var(--foreground)]/60">
+                        No outgoing messages yet
+                      </div>
+                    ) : (
+                      <div ref={sendRef} className="mt-3 space-y-2 max-h-96 overflow-y-auto">
+                        {sentMessages.slice().reverse().map((msg) => {
+                          const status = getStatusDisplay(msg.status);
+                          return (
+                            <div
+                              key={msg.id}
+                              className="rounded-md border border-blue-500/20 bg-blue-50/80 p-3"
+                            >
+                              <div className="flex items-center justify-between gap-2 text-xs text-[var(--foreground)]/60">
+                                <span className={`font-semibold ${status.color}`}>
+                                  {status.text}
+                                </span>
+                                <span>Tick {msg.timestamp}</span>
+                              </div>
+                              <div className="mt-2 text-sm font-mono text-[var(--foreground)] break-words">
+                                {msg.text || "(empty)"}
+                              </div>
+                              <div className="mt-2 text-xs text-[var(--foreground)]/60">
+                                To: {resolveLabel(msg.toNodeId)} | Hops: {msg.hops ?? 0}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
+                    <div className="flex items-center justify-between gap-2 pb-3 border-b border-green-500/20">
+                      <h3 className="text-sm font-semibold text-[var(--foreground)]">
+                        Receive
+                      </h3>
+                      <span className="text-xs text-[var(--foreground)]/60">
+                        {receivedMessages.length} total
+                      </span>
+                    </div>
+                    {receivedMessages.length === 0 ? (
+                      <div className="py-6 text-center text-xs text-[var(--foreground)]/60">
+                        No incoming messages yet
+                      </div>
+                    ) : (
+                      <div ref={receiveRef} className="mt-3 space-y-2 max-h-96 overflow-y-auto">
+                        {receivedMessages.slice().reverse().map((msg) => (
+                          <div
+                            key={msg.id}
+                            className="rounded-md border border-green-500/20 bg-green-50/80 p-3"
+                          >
+                            <div className="flex items-center justify-between gap-2 text-xs text-[var(--foreground)]/60">
+                              <span className="font-semibold text-green-500">
+                                RECEIVED
+                              </span>
+                              <span>Tick {msg.timestamp}</span>
+                            </div>
+                            <div className="mt-2 text-sm font-mono text-[var(--foreground)] break-words">
+                              {msg.text || "(empty)"}
+                            </div>
+                            <div className="mt-2 text-xs text-[var(--foreground)]/60">
+                              From: {resolveLabel(msg.fromNodeId)} | Hops: {msg.hops ?? 0}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
                 </div>
-              )}
-            </section>
-          </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
+      {/* ── Send/Receive columns removed from here (now in thread area) ── */}
+
       {/* ── Summary bar ────────────────────────────────── */}
-      {messages.length > 0 && (
+      {messages.length > 0 && viewMode !== "all-logs" && (
         <div
           className={`flex w-full items-center justify-center gap-4 py-1.5 ${
             isPanel ? "px-2" : "mx-auto max-w-lg px-6"
@@ -1255,99 +1472,101 @@ export function Messenger({
       )}
 
       {/* ── Route path + Composer ───────────────────────── */}
-      <div className={isPanel ? "w-full px-2 pb-2" : "mx-auto w-full max-w-lg px-4 pb-2"}>
-        {/* Route visualization */}
-        {gatewayNode &&
-          selectedDest !== null &&
-          selectedDest !== "all" && (
-            <div className="mb-2 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted)]">
-              <span className="text-blue-500">📱 You</span>
-              <span className="text-[var(--muted)]/30">—</span>
-              <span className="rounded-md bg-blue-500/10 px-1.5 py-0.5 text-blue-600">
-                BLE
-              </span>
-              <span className="text-[var(--muted)]/30">→</span>
-              <span className="font-medium text-[var(--foreground)]/70">
-                {gatewayNode.label}
-              </span>
-              <span className="text-[var(--muted)]/30">—</span>
-              <span className="rounded-md bg-[var(--accent)]/10 px-1.5 py-0.5 text-[var(--accent)]">
-                LoRa
-              </span>
-              <span className="text-[var(--muted)]/30">→</span>
-              <span className="font-medium text-[var(--foreground)]/70">
-                {selectedNodeLabel}
-              </span>
-            </div>
-          )}
+      {viewMode !== "all-logs" && (
+        <div className={isPanel ? "w-full px-2 pb-2" : "mx-auto w-full max-w-lg px-4 pb-2"}>
+          {/* Route visualization */}
+          {gatewayNode &&
+            selectedDest !== null &&
+            selectedDest !== "all" && (
+              <div className="mb-2 flex items-center justify-center gap-1.5 text-[10px] text-[var(--muted)]">
+                <span className="text-blue-500">📱 You</span>
+                <span className="text-[var(--muted)]/30">—</span>
+                <span className="rounded-md bg-blue-500/10 px-1.5 py-0.5 text-blue-600">
+                  BLE
+                </span>
+                <span className="text-[var(--muted)]/30">→</span>
+                <span className="font-medium text-[var(--foreground)]/70">
+                  {gatewayNode.label}
+                </span>
+                <span className="text-[var(--muted)]/30">—</span>
+                <span className="rounded-md bg-[var(--accent)]/10 px-1.5 py-0.5 text-[var(--accent)]">
+                  LoRa
+                </span>
+                <span className="text-[var(--muted)]/30">→</span>
+                <span className="font-medium text-[var(--foreground)]/70">
+                  {selectedNodeLabel}
+                </span>
+              </div>
+            )}
 
-        {/* Input bar */}
-        <div
-          className={`flex items-center gap-2 rounded-2xl px-4 py-2 transition-colors ${
-            canSend || (selectedDest !== null && selectedDest !== "all")
-              ? "bg-white shadow-sm ring-1 ring-[var(--foreground)]/[0.06]"
-              : "bg-[var(--foreground)]/[0.03]"
-          }`}
-        >
-          <input
-            ref={inputRef}
-            type="text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={
-              selectedDest === null ||
-              selectedDest === "all" ||
-              !gatewayNode
-            }
-            placeholder={
-              !gatewayNode
-                ? gatewayMode === "any"
-                  ? "Select a node to act as"
-                  : "No gateway in BLE range"
-                : selectedDest !== null && selectedDest !== "all"
-                  ? `Message ${selectedNodeLabel} via ${gatewayNode.label}…`
-                  : selectedDest === "all"
-                    ? "Viewing message log"
-                    : "Select a destination above"
-            }
-            className="flex-1 bg-transparent text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/60 outline-none disabled:cursor-not-allowed"
-          />
-          <button
-            onClick={handleSend}
-            disabled={!canSend}
-            className={`flex h-7 w-7 items-center justify-center rounded-full transition-all duration-150 ${
-              canSend
-                ? "bg-[var(--accent)] text-white shadow-sm hover:opacity-90"
-                : "bg-[var(--foreground)]/[0.06] text-[var(--muted)]/40"
+          {/* Input bar */}
+          <div
+            className={`flex items-center gap-2 rounded-2xl px-4 py-2 transition-colors ${
+              canSend || (selectedDest !== null && selectedDest !== "all")
+                ? "bg-white shadow-sm ring-1 ring-[var(--foreground)]/[0.06]"
+                : "bg-[var(--foreground)]/[0.03]"
             }`}
-            aria-label="Send message"
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+            <input
+              ref={inputRef}
+              type="text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={
+                selectedDest === null ||
+                selectedDest === "all" ||
+                !gatewayNode
+              }
+              placeholder={
+                !gatewayNode
+                  ? gatewayMode === "any"
+                    ? "Select a node to act as"
+                    : "No gateway in BLE range"
+                  : selectedDest !== null && selectedDest !== "all"
+                    ? `Message ${selectedNodeLabel} via ${gatewayNode.label}…`
+                    : selectedDest === "all"
+                      ? "Viewing message log"
+                      : "Select a destination above"
+              }
+              className="flex-1 bg-transparent text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/60 outline-none disabled:cursor-not-allowed"
+            />
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className={`flex h-7 w-7 items-center justify-center rounded-full transition-all duration-150 ${
+                canSend
+                  ? "bg-[var(--accent)] text-white shadow-sm hover:opacity-90"
+                  : "bg-[var(--foreground)]/[0.06] text-[var(--muted)]/40"
+              }`}
+              aria-label="Send message"
             >
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
-          </button>
-        </div>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            </button>
+          </div>
 
-        {/* BLE connection hint */}
-        {gatewayNode && (
-          <p className="mt-1 text-center text-[10px] text-[var(--muted)]/40">
-            {gatewayMode === "ble"
-              ? `${gatewayDist}m to ${gatewayNode.label} via Bluetooth · ${bleSignal(gatewayDist).label}`
-              : `Acting as ${gatewayNode.label} (simulation override)`}
-          </p>
-        )}
-      </div>
+          {/* BLE connection hint */}
+          {gatewayNode && (
+            <p className="mt-1 text-center text-[10px] text-[var(--muted)]/40">
+              {gatewayMode === "ble"
+                ? `${gatewayDist}m to ${gatewayNode.label} via Bluetooth · ${bleSignal(gatewayDist).label}`
+                : `Acting as ${gatewayNode.label} (simulation override)`}
+            </p>
+          )}
+        </div>
+      )}
         </div>
       </div>
     </div>
@@ -1432,6 +1651,104 @@ function LogEntry({
             tick {message.timestamp}
           </span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MessageBitDetails({
+  payloadBytes,
+  bitsSent,
+  status,
+  ttlRemaining,
+  isNearExpiry,
+}: {
+  payloadBytes: Uint8Array;
+  bitsSent: number;
+  status: ChatMessage["status"];
+  ttlRemaining: number | null;
+  isNearExpiry: boolean;
+}) {
+  const totalBits = payloadBytes.length * 8;
+  const sentBits = Math.min(bitsSent, totalBits);
+  const remainingBits = Math.max(totalBits - sentBits, 0);
+  const qualityLabel =
+    status === "delivered"
+      ? "good"
+      : status === "failed"
+        ? "failed"
+        : isNearExpiry
+          ? "at-risk"
+          : "in-flight";
+  const sentClass =
+    status === "delivered"
+      ? "text-emerald-600"
+      : status === "failed"
+        ? "text-red-500/70"
+        : isNearExpiry
+          ? "text-red-500"
+          : "text-[var(--suggest)]";
+  const pendingClass =
+    status === "failed" ? "text-red-400/40" : "text-[var(--muted)]/50";
+
+  if (payloadBytes.length === 0) {
+    return (
+      <div className="mt-2 rounded-md bg-white/70 p-2 text-[9px] text-[var(--muted)]">
+        Empty payload.
+      </div>
+    );
+  }
+
+  const bytesPerRow = 8;
+  const rows = [] as Array<Uint8Array>;
+  for (let i = 0; i < payloadBytes.length; i += bytesPerRow) {
+    rows.push(payloadBytes.slice(i, i + bytesPerRow));
+  }
+
+  return (
+    <div className="mt-2 rounded-md bg-white/70 p-2 text-[9px] text-[var(--muted)]">
+      <div className="flex flex-wrap items-center gap-3 text-[9px]">
+        <span className="font-semibold text-[var(--foreground)]/70">Bit log</span>
+        <span>
+          {sentBits}/{totalBits} bits sent
+        </span>
+        <span>{remainingBits} remaining</span>
+        {ttlRemaining !== null && <span>TTL {ttlRemaining}t</span>}
+        <span className="uppercase tracking-wide">quality: {qualityLabel}</span>
+      </div>
+      <div className="mt-2 space-y-1 font-mono">
+        {rows.map((row, rowIndex) => (
+          <div key={`row-${rowIndex}`} className="flex flex-wrap gap-2">
+            {Array.from(row).map((byte, byteIndex) => {
+              const absoluteByteIndex = rowIndex * bytesPerRow + byteIndex;
+              const byteStartBit = absoluteByteIndex * 8;
+              const sentInByte = Math.max(
+                0,
+                Math.min(8, sentBits - byteStartBit),
+              );
+              const bitString = byte.toString(2).padStart(8, "0");
+              const sentPart = bitString.slice(0, sentInByte);
+              const pendingPart = bitString.slice(sentInByte);
+              const hex = byte.toString(16).padStart(2, "0");
+
+              return (
+                <span
+                  key={`byte-${absoluteByteIndex}`}
+                  className="inline-flex items-center gap-1 rounded border border-[var(--foreground)]/10 px-1 py-0.5"
+                >
+                  <span className="text-[8px] text-[var(--muted)]/50">
+                    {absoluteByteIndex.toString().padStart(2, "0")}
+                  </span>
+                  <span className={sentClass}>{sentPart}</span>
+                  <span className={pendingClass}>{pendingPart}</span>
+                  <span className="text-[8px] text-[var(--muted)]/50">
+                    {hex}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );

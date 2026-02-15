@@ -156,6 +156,12 @@ export function LeafletMap({
                   />
                   <span className="text-[10px] text-[var(--foreground)]">LoRa (long range)</span>
                 </div>
+                <div className="flex items-center gap-2">
+                  <svg width="24" height="8" className="shrink-0">
+                    <line x1="0" y1="4" x2="24" y2="4" stroke="#6b7280" strokeWidth="1.5" strokeDasharray="4 8" opacity="0.25" />
+                  </svg>
+                  <span className="text-[10px] text-[var(--foreground)]">Trust connections</span>
+                </div>
               </div>
             </div>
 
@@ -244,6 +250,44 @@ export function LeafletMap({
             }}
           />
         ))}
+
+        {/* Trust relationship lines (gray lines connecting trusted nodes) */}
+        {(() => {
+          const drawnConnections = new Set<string>();
+          return nodeStates.flatMap((ns) => {
+            if (!ns.trustedPeers || ns.trustedPeers.length === 0) return [];
+            
+            return ns.trustedPeers.map((peerId) => {
+              // Create a unique key for this connection (sorted to avoid duplicates)
+              const connectionKey = [ns.id, peerId].sort((a, b) => a - b).join('-');
+              
+              // Skip if we've already drawn this connection
+              if (drawnConnections.has(connectionKey)) return null;
+              drawnConnections.add(connectionKey);
+              
+              // Find peer node
+              const peer = nodeStates.find((n) => n.id === peerId);
+              if (!peer) return null;
+              
+              // Use true positions for trust lines
+              return (
+                <Polyline
+                  key={`trust-${connectionKey}`}
+                  positions={[
+                    [ns.trueLat, ns.trueLng],
+                    [peer.trueLat, peer.trueLng],
+                  ]}
+                  pathOptions={{
+                    color: "#6b7280",
+                    weight: 1.5,
+                    opacity: 0.25,
+                    dashArray: "4 8",
+                  }}
+                />
+              );
+            }).filter(Boolean);
+          });
+        })()}()
 
         {/* Error lines: connect true → estimated position (god mode only) */}
         {showGodMode &&

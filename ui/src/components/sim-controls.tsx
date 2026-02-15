@@ -77,22 +77,6 @@ export function SimControls({
         </div>
       )}
 
-      {/* Membership coverage bar */}
-      {stats && (
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] text-[var(--muted)]">Membership</span>
-          <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--foreground)]/[0.06]">
-            <div
-              className="absolute inset-y-0 left-0 rounded-full bg-[var(--accent)] transition-all duration-500"
-              style={{ width: `${Math.round(stats.membershipCoverage * 100)}%` }}
-            />
-          </div>
-          <span className="w-8 text-right text-[10px] tabular-nums text-[var(--muted)]">
-            {Math.round(stats.membershipCoverage * 100)}%
-          </span>
-        </div>
-      )}
-
       {/* Event log */}
       <div className="flex max-h-36 flex-col gap-0.5 overflow-y-auto scrollbar-none">
         {events

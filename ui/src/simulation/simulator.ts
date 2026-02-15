@@ -28,6 +28,9 @@ export class MeshSimulator {
   /** RF environment simulator */
   environment: Environment;
 
+  /** When true, nodes only route through trusted peers */
+  private trustedOnlyRouting = false;
+
   private transmissions: Transmission[] = [];
   private events: SimEvent[] = [];
   private totalSent = 0;
@@ -98,6 +101,8 @@ export class MeshSimulator {
 
     // 1. Each node runs its loop (beacon timers, expiry, trilateration, attacks)
     for (const node of this.nodes.values()) {
+      // Pass the trusted-only routing flag to each node
+      node.setTrustedOnlyRouting(this.trustedOnlyRouting);
       node.loop(this.tick);
     }
 
@@ -485,25 +490,43 @@ export class MeshSimulator {
   configureTrustGraph(nodeIds: number[], density: number): void {
     const d = Math.max(0, Math.min(1, density));
 
+    // Clear existing trust relationships
     for (const nodeId of nodeIds) {
       const node = this.nodes.get(nodeId);
       if (node) node.clearTrustedPeers();
     }
     
-    // Create connections based on density
+    // Generate all possible pairs
+    const allPairs: Array<[number, number]> = [];
     for (let i = 0; i < nodeIds.length; i++) {
       for (let j = i + 1; j < nodeIds.length; j++) {
-        if (Math.random() < d) {
-          this.establishTrust(nodeIds[i], nodeIds[j]);
-        }
+        allPairs.push([nodeIds[i], nodeIds[j]]);
       }
     }
     
-    const possibleConnections = (nodeIds.length * (nodeIds.length - 1)) / 2;
-    const actualConnections = Math.floor(possibleConnections * d);
+    // Calculate exact number of connections to create
+    const targetConnections = Math.round(allPairs.length * d);
+    
+    // Shuffle pairs using Fisher-Yates algorithm
+    for (let i = allPairs.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [allPairs[i], allPairs[j]] = [allPairs[j], allPairs[i]];
+    }
+    
+    // Create exactly the target number of connections
+    let actualConnections = 0;
+    for (let i = 0; i < targetConnections && i < allPairs.length; i++) {
+      const [nodeId1, nodeId2] = allPairs[i];
+      this.establishTrust(nodeId1, nodeId2);
+      actualConnections++;
+    }
+    
+    const achievedDensity = allPairs.length > 0 
+      ? (actualConnections / allPairs.length) * 100 
+      : 0;
     
     this.log(
-      `🌐 Trust graph configured: ${actualConnections} connections at ${(d * 100).toFixed(0)}% density`,
+      `🌐 Trust graph configured: ${actualConnections}/${allPairs.length} connections (${achievedDensity.toFixed(1)}% density)`,
       "info",
     );
   }
@@ -581,4 +604,14 @@ export class MeshSimulator {
     this.environment.clearJammers();
     this.log("Jammers cleared", "info");
   }
-}
+  /**
+   * Enable or disable trusted-only routing.
+   * When enabled, nodes only route through peers they trust.
+   */
+  setTrustedOnlyRouting(enabled: boolean): void {
+    this.trustedOnlyRouting = enabled;
+    this.log(
+      `🔒 Trusted-only routing: ${enabled ? "ENABLED" : "DISABLED"}`,
+      "info",
+    );
+  }}

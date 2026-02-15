@@ -21,28 +21,9 @@ export function TrustGraphConfig({
   trustMap,
   onApplyConnections,
 }: TrustGraphConfigProps) {
-  const [selectedNodes, setSelectedNodes] = useState<Set<number>>(new Set());
   const [draftConnections, setDraftConnections] = useState<
     Record<number, Set<number>>
   >({});
-
-  const handleToggleNode = (nodeId: number) => {
-    const newSet = new Set(selectedNodes);
-    if (newSet.has(nodeId)) {
-      newSet.delete(nodeId);
-    } else {
-      newSet.add(nodeId);
-    }
-    setSelectedNodes(newSet);
-  };
-
-  const handleSelectAll = () => {
-    if (selectedNodes.size === availableNodes.length) {
-      setSelectedNodes(new Set());
-    } else {
-      setSelectedNodes(new Set(availableNodes.map((n) => n.id)));
-    }
-  };
 
   // Filter out malicious nodes from trust graph
   const availableNodes = nodes.filter((n) => !n.label?.startsWith("[MAL]"));
@@ -102,6 +83,14 @@ export function TrustGraphConfig({
     setDraftConnections({});
   };
 
+  // Calculate trust graph stats
+  const totalConnections = Object.values(baseTrustMap).reduce(
+    (sum, peers) => sum + peers.length,
+    0
+  ) / 2; // Divide by 2 since connections are bidirectional
+  const maxPossibleConnections = (availableNodes.length * (availableNodes.length - 1)) / 2;
+  const density = maxPossibleConnections > 0 ? (totalConnections / maxPossibleConnections) * 100 : 0;
+
   return (
     <div className="absolute inset-0 top-16 bottom-10 flex flex-col bg-[var(--surface)] text-[var(--foreground)] overflow-hidden">
       {/* Header */}
@@ -114,53 +103,33 @@ export function TrustGraphConfig({
 
       {/* Configuration */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
-        {/* Node Selection */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label className="text-sm font-medium">Select Nodes</label>
-            <button
-              onClick={handleSelectAll}
-              className="text-xs text-blue-400 hover:text-blue-300"
-            >
-              {selectedNodes.size === availableNodes.length ? "Deselect All" : "Select All"}
-            </button>
-          </div>
-
-          {availableNodes.length === 0 ? (
-            <div className="text-center text-[var(--foreground)]/50 py-8">
-              No nodes available. Add nodes in the Node Manager.
+        {/* Trust Graph Overview */}
+        <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+          <h3 className="text-sm font-semibold mb-3 text-blue-600">📊 Trust Graph Overview</h3>
+          <div className="grid grid-cols-3 gap-4">
+            <div className="text-center">
+              <div className="text-2xl font-bold text-[var(--foreground)]">{availableNodes.length}</div>
+              <div className="text-xs text-[var(--foreground)]/60">Nodes</div>
             </div>
-          ) : (
-            <div className="space-y-1.5">
-              {availableNodes.map((node) => {
-                const isSelected = selectedNodes.has(node.id);
-                return (
-                  <label
-                    key={node.id}
-                    className={`flex items-center gap-3 p-2.5 rounded border cursor-pointer transition-colors ${
-                      isSelected
-                        ? "border-blue-500 bg-blue-500/10"
-                        : "border-[var(--foreground)]/10 bg-[var(--foreground)]/5 hover:border-[var(--foreground)]/20"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => handleToggleNode(node.id)}
-                      className="w-4 h-4"
-                    />
-                    <div className="flex-1">
-                      <div className="text-sm font-medium">
-                        {node.label || `Node ${node.id}`}
-                      </div>
-                      <div className="text-xs text-[var(--foreground)]/50">
-                        ID: {node.id}
-                        {node.isAnchor && " • GPS Anchor"}
-                      </div>
-                    </div>
-                  </label>
-                );
-              })}
+            <div className="text-center">
+              <div className="text-2xl font-bold text-blue-600">{totalConnections}</div>
+              <div className="text-xs text-[var(--foreground)]/60">Connections</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-600">{density.toFixed(0)}%</div>
+              <div className="text-xs text-[var(--foreground)]/60">Density</div>
+            </div>
+          </div>
+          
+          {totalConnections === 0 && availableNodes.length >= 2 && (
+            <div className="mt-3 text-center text-xs text-amber-600 bg-amber-500/10 rounded-lg py-2 px-3">
+              ⚠️ No trust connections configured. Add connections below to enable secure routing.
+            </div>
+          )}
+          
+          {totalConnections > 0 && (
+            <div className="mt-3 text-xs text-[var(--foreground)]/60">
+              Trust connections are shown as gray lines on the map.
             </div>
           )}
         </div>

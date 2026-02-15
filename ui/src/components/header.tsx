@@ -1,6 +1,6 @@
 "use client";
 
-export type ViewMode = "map" | "sensors" | "nodes" | "trust";
+export type ViewMode = "map" | "sensors" | "nodes";
 
 interface HeaderProps {
   view: ViewMode;
@@ -42,17 +42,7 @@ export function Header({
               : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
           }`}
         >
-          Nodes
-        </button>
-        <button
-          onClick={() => onViewChange("trust")}
-          className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
-            view === "trust"
-              ? "bg-white text-[var(--foreground)] shadow-sm"
-              : "text-[var(--muted)] hover:text-[var(--foreground)]/60"
-          }`}
-        >
-          Trust
+          Nodes & Trust
         </button>
         <button
           onClick={() => onViewChange("sensors")}
